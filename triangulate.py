@@ -109,9 +109,9 @@ def get_video():
     lat=ams216["long_lat"][0,1]
 
     obs=EarthLocation(lon=long,height=0,lat=lat)
-    dt = TimeDelta(dur/2.0,format="sec")
-    aa_frame = AltAz(obstime=t0+dt, location=obs)
-    return({"az":az,"el":el,"observer_tol":obs,"altaz_frame":aa_frame,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
+    #dt = TimeDelta(dur/2.0,format="sec")
+    #aa_frame = AltAz(obstime=t0+dt, location=obs)
+    return({"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
 
 def xy_to_azel(az,el,x,y):
     return(az[int(x),int(y)],el[int(x),int(y)])
@@ -140,9 +140,7 @@ def get_video2():
     lat=53.1529
     # needed for star plotting
     obs=EarthLocation(lon=long,height=0,lat=lat)
-    dt = TimeDelta(dur/2.0,format="sec")
-    aa_frame = AltAz(obstime=t0+dt, location=obs)
-    return({"az":az,"el":el,"observer_tol":obs,"altaz_frame":aa_frame,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
+    return({"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
 
 v1=get_video()
 v2=get_video2()
@@ -192,16 +190,21 @@ for fi in range(n_frames):
             # dont plot stars. useful for checking plate solve but slows things down
             plot_stars=True
             if plot_stars: 
+                star_ys=[]
+                star_xs=[]
                 for i in range(100):
+                    # plot bright stars 
                     d=bs.get_ra_dec_vmag(i)
                     c = SkyCoord(ra=d[0]*u.degree, dec=d[1]*u.degree, frame='icrs')
-
-                    altaz=c.transform_to(v["aa_frame"])
+                    aa_frame = AltAz(obstime=Time(tnow, format='unix'), location=v["obs"])
+                    altaz=c.transform_to(aa_frame)
                     star_az=float(altaz.az/u.deg)
                     star_el=float(altaz.alt/u.deg)
                     x,y=n.unravel_index(n.argmin((180*n.angle(n.exp(1j*n.pi*star_az/180)*n.exp(-1j*n.pi*v["az"]/180))/n.pi)**2 + (star_el-v["el"])**2),v["el"].shape)
                     if x > 0 and x < v["az"].shape[0] and y > 0 and y < v["az"].shape[1]:
-                        ax.scatter(y,x,s=80, facecolors='none', edgecolors='w',alpha=0.2)
+                        star_xs.append(x)
+                        star_ys.append(y)
+                ax.scatter(star_ys,star_xs,s=80, facecolors='none', edgecolors='w',alpha=0.2)
 
             def onkey(event):
                 if event.key == "q":
