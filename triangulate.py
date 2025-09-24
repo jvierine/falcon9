@@ -226,7 +226,7 @@ for fi in range(n_frames):
                     # read cam 1 position
                     x, y = int(event.xdata), int(event.ydata)
                     taz,tel=xy_to_azel(v["az"],v["el"],y,x)
-                    if tnow not in v["fragments"].keys():
+                    if tnow_key not in v["fragments"].keys():
                         v["fragments"][tnow_key]={}
                     v["fragments"][tnow_key][int(event.key)]={"x":x,"y":y,"az":taz,"el":tel,"fragment_id":int(event.key)}
                     # add record of fragment id
@@ -245,12 +245,13 @@ for fi in range(n_frames):
         plt.show()
     if True:
         for fid in fragment_ids.keys():
+            print("key %d"%(fid))
             lats=[]
             longs=[]
             azs=[]
             els=[]
             for v in videos:
-                if tnow_key in v["fragments"].keys() and fid in v["fragments"][tnow_key].keys():
+                if (tnow_key in v["fragments"].keys()) and (fid in v["fragments"][tnow_key].keys()):
                     lats.append(v["lat"])
                     longs.append(v["long"])
                     azs.append(v["fragments"][tnow_key][fid]["az"])
