@@ -40,6 +40,14 @@ def fanplot(azs,els,lats,lons):
 def triangulate(azs,els,lats,lons,plot_line_of_sight=False):
     """
     tbd: support more than two cameras. 
+    this is done as follows:
+    1) for each unique pair of two cameras
+         a) add two rows into m:  m.append(n.dot(r1,e0)-n.dot(r0,e0)) m.append(n.dot(r1,e1)-n.dot(r0,e1))
+         b) add two rows into A: A.append([1,-n.dot(e1,e0)]) A.append([n.dot(e0,e1),-1])
+    2) solve least squares for xhat
+    3) compute pos0, pos1 for each camera
+    4) average all pos0, pos1 to get final position estimate
+    5) compute shortest intersection distances and report max distance as error estimate
     """
     # two camera triangulation
     r0=jcoord.geodetic2ecef(lats[0],lons[0],0)
@@ -51,7 +59,6 @@ def triangulate(azs,els,lats,lons,plot_line_of_sight=False):
     if plot_line_of_sight:
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
-
         r01=r0+e0*1300e3
         r11=r1+e1*1300e3
         ax.scatter([r0[0]],[r0[1]],[r0[2]],color="red")
@@ -131,31 +138,22 @@ def get_video2():
     tbd: make this more generic, so each video has the same type of metadata file
     """
     ams95=sio.loadmat("ams95.mat")
-    #print(ams95.keys())
     # renamed to standard name...
-    video_path = "2025_02_19_03_44_00_000_010954.mp4"#2025_02_19_03_44_00_000_010954__2025_02_19_03_45_00_000_010954.mp4"
+    video_path = "2025_02_19_03_44_00_000_010954.mp4"
     cap = cv2.VideoCapture(video_path)
-    #   cap2 = cv2.VideoCapture(video_path2)
+    # 
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     dur=frame_count/25.0
 
     t0=file_name_to_datetime(video_path)
-#    print(t0)
-#    ams216=sio.loadmat("ams216.mat")
+    # lens model
     az=180*ams95["flipped_az"]/n.pi
     ze=180*ams95["flipped_ze"]/n.pi
     el=90-ze
-#            "device_lng": "8.1651",
- #       "device_lat": "53.1529",
-  #      "device_alt": "30",
-    long=8.1651#ams216["long_lat"][0,0]
-    lat=53.1529#ams216["long_lat"][0,1]
-  #  print(long)
- #   print(lat)
-#    print(ams216.keys())
-    #azel_to_pixel = build_azel_to_pixel_map(az, ze)
-    #print(azel_to_pixel(az[100,100]+0.01,90-ze[100,100]+0.01))
-    #exit(0)
+    # location
+    long=8.1651
+    lat=53.1529
+    # needed for star plotting
     obs=EarthLocation(lon=long,height=0,lat=lat)
     dt = TimeDelta(dur/2.0,format="sec")
     aa_frame = AltAz(obstime=t0+dt, location=obs)
@@ -257,12 +255,8 @@ for fi in range(n_frames):
                     longs.append(v["long"])
                     azs.append(v["fragments"][tnow_key][fid]["az"])
                     els.append(v["fragments"][tnow_key][fid]["el"])    
-            if len(lats) == 2:
+            if len(lats) == 2: # tbd: support more than two cameras in triangulate()
                 print("triangulating fragement id %d"%(fid))
                 triangulate(azs,els,lats,longs)
 
-
-#        frames.append((idx, frame_rgb))
-
-#cap.release()
 
