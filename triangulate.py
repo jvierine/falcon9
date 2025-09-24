@@ -175,23 +175,23 @@ for fi in range(n_frames):
         # if not in video range, skip
         if idx < 0 or idx >= v["frame_count"]:
             continue
-
+        # seek frame number idx
         v["cap"].set(cv2.CAP_PROP_POS_FRAMES, idx)
-        #    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        # read frame
         ret, frame = v["cap"].read()
-        #    cap2.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        #   ret2, frame2 = cap2.read()
+        # if we get a frame
         if ret:
             # Convert from BGR (OpenCV default) to RGB for plotting
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
+            # plot
             fig, ax = plt.subplots(1,1)
             ax.imshow(frame_rgb)
             print("frame %d"%(idx))
             ax.set_title(f"zoom and position cursor, then press fragment id number (1-9) ")#%(lat,long))
-            plot_stars=False
-
-            if plot_stars: # dont plot stars
+            
+            # dont plot stars. useful for checking plate solve but slows things down
+            plot_stars=True
+            if plot_stars: 
                 for i in range(100):
                     d=bs.get_ra_dec_vmag(i)
                     c = SkyCoord(ra=d[0]*u.degree, dec=d[1]*u.degree, frame='icrs')
