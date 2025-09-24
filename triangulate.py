@@ -25,17 +25,6 @@ import jcoord
 
 import matplotlib.pyplot as plt
 
-def fanplot(azs,els,lats,lons):
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-
-    for ai in range(len(azs)):
-        r0=jcoord.geodetic2ecef(lats[ai],lons[ai],0)
-        e0=jcoord.azel_ecef(lats[ai],lons[ai],0,azs[ai],els[ai])
-        r01=r0+e0*1000e3
-        ax.scatter([r0[0]],[r0[1]],[r0[2]],color="red")
-        ax.plot([r0[0],r01[0]],[r0[1],r01[1]],[r0[2],r01[2]])
-    plt.show()
 
 def triangulate(azs,els,lats,lons,plot_line_of_sight=False):
     """
@@ -118,12 +107,7 @@ def get_video():
     el=90-ze
     long=ams216["long_lat"][0,0]
     lat=ams216["long_lat"][0,1]
-#    print(long)
- #   print(lat)
-  #  print(ams216.keys())
-    #azel_to_pixel = build_azel_to_pixel_map(az, ze)
-    #print(azel_to_pixel(az[100,100]+0.01,90-ze[100,100]+0.01))
-    #exit(0)
+
     obs=EarthLocation(lon=long,height=0,lat=lat)
     dt = TimeDelta(dur/2.0,format="sec")
     aa_frame = AltAz(obstime=t0+dt, location=obs)
@@ -135,7 +119,8 @@ def xy_to_azel(az,el,x,y):
 
 def get_video2():
     """
-    tbd: make this more generic, so each video has the same type of metadata file
+    tbd: make this more generic, so each video has the same type of metadata file. 
+    we shouldn't need to make one of these for each video separately!
     """
     ams95=sio.loadmat("ams95.mat")
     # renamed to standard name...
@@ -159,11 +144,7 @@ def get_video2():
     aa_frame = AltAz(obstime=t0+dt, location=obs)
     return({"az":az,"el":el,"observer_tol":obs,"altaz_frame":aa_frame,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
 
-#    return(az,el,obs,aa_frame,video_path,lat,long)
-
-#az,el,obs,aa_frame,video_path,lat,long
 v1=get_video()
-#az2,el2,obs2,aa_frame2,video_path2,lat2,long2
 v2=get_video2()
 
 # all videos to process
@@ -174,16 +155,21 @@ bs=bright_stars.bright_stars()
 
 # find smallest t0 in videos
 t0_min=n.min([v["t0"] for v in videos])
+# find largest t1 in videos
 t1_max=n.max([v["t1"] for v in videos])
 
 dt = 1.0 # seconds between frames to sample
 
+# go through all frames with dt spacing
 n_frames = int((t1_max-t0_min)/dt)
 fragment_ids={}
 for fi in range(n_frames):
     # time now in ms since t0_min
     tnow = (t0_min + dt*fi)
+    # key for fragments dict
     tnow_key=int(tnow*1000.0)
+    # go through all videos and ask user to mark fragments with keys 1-9
+    # tbd: figure out how to index more framents if needed...  
     for v in videos:
         idx = int((tnow - v["t0"])*v["fps"])
         # if not in video range, skip
@@ -244,6 +230,7 @@ for fi in range(n_frames):
         fig.canvas.mpl_connect("key_press_event", onkey)
         plt.show()
     if True:
+        # triangulate all fragments seen by two cameras
         for fid in fragment_ids.keys():
             print("key %d"%(fid))
             lats=[]
