@@ -24,7 +24,7 @@ from scipy.interpolate import RegularGridInterpolator
 import jcoord
 
 import matplotlib.pyplot as plt
-
+import h5py
 
 def triangulate(azs,els,lats,lons,plot_line_of_sight=False):
     """
@@ -70,8 +70,8 @@ def triangulate(azs,els,lats,lons,plot_line_of_sight=False):
     print(jcoord.ecef2geodetic(pos_est[0],pos_est[1],pos_est[2]))
 #    print(jcoord.ecef2geodetic(pos1[0],pos1[1],pos1[2]))
 
-    print("shortest intersection %1.2f m"%(n.linalg.norm(pos0-pos1)))
-    return(pos_est)
+    print("shortest intersection %1.2f m distances %1.2f %1.2f km"%(n.linalg.norm(pos0-pos1),xhat[0]/1000.0,xhat[1]/1000.0))
+    return(pos_est,n.linalg.norm(pos0-pos1))
 
 def file_name_to_datetime(fname):
     """
@@ -111,7 +111,7 @@ def get_video():
     obs=EarthLocation(lon=long,height=0,lat=lat)
     #dt = TimeDelta(dur/2.0,format="sec")
     #aa_frame = AltAz(obstime=t0+dt, location=obs)
-    return({"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
+    return({"camera_id":"2165","az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
 
 def xy_to_azel(az,el,x,y):
     return(az[int(x),int(y)],el[int(x),int(y)])
@@ -140,7 +140,7 @@ def get_video2():
     lat=53.1529
     # needed for star plotting
     obs=EarthLocation(lon=long,height=0,lat=lat)
-    return({"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
+    return({"camera_id":"954","az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
 
 v1=get_video()
 v2=get_video2()
@@ -188,11 +188,12 @@ for fi in range(n_frames):
             ax.set_title(f"zoom and position cursor, then press fragment id number (1-9) ")#%(lat,long))
             
             # dont plot stars. useful for checking plate solve but slows things down
-            plot_stars=True
+            plot_stars=False
             if plot_stars: 
                 star_ys=[]
                 star_xs=[]
-                for i in range(100):
+                max_stars=500
+                for i in range(max_stars):
                     # plot bright stars 
                     d=bs.get_ra_dec_vmag(i)
                     c = SkyCoord(ra=d[0]*u.degree, dec=d[1]*u.degree, frame='icrs')
@@ -200,6 +201,9 @@ for fi in range(n_frames):
                     altaz=c.transform_to(aa_frame)
                     star_az=float(altaz.az/u.deg)
                     star_el=float(altaz.alt/u.deg)
+                    # this is the slow part...
+                    # find closest pixel in az,el arrays
+                    # how to speed this up???
                     x,y=n.unravel_index(n.argmin((180*n.angle(n.exp(1j*n.pi*star_az/180)*n.exp(-1j*n.pi*v["az"]/180))/n.pi)**2 + (star_el-v["el"])**2),v["el"].shape)
                     if x > 0 and x < v["az"].shape[0] and y > 0 and y < v["az"].shape[1]:
                         star_xs.append(x)
@@ -240,14 +244,32 @@ for fi in range(n_frames):
             longs=[]
             azs=[]
             els=[]
+            cam_ids=[]
             for v in videos:
                 if (tnow_key in v["fragments"].keys()) and (fid in v["fragments"][tnow_key].keys()):
+                    cam_ids.append(v["camera_id"])
                     lats.append(v["lat"])
                     longs.append(v["long"])
                     azs.append(v["fragments"][tnow_key][fid]["az"])
                     els.append(v["fragments"][tnow_key][fid]["el"])    
             if len(lats) == 2: # tbd: support more than two cameras in triangulate()
                 print("triangulating fragement id %d"%(fid))
-                triangulate(azs,els,lats,longs)
+                pos_est,error_std=triangulate(azs,els,lats,longs)
+#                v["fragments"][tnow_key][fid]["pos_est"]=pos_est
+
+            # save fragment data to hdf5 file with h5py
+            # only save if more than two cameras see it
+            id_str=""
+            if len(cam_ids) > 1:
+                for cid in cam_ids:
+                    id_str=id_str + "_"+ cid
+                ofname="fragments/%d%s_%s.h5"%(fid,id_str,tnow_key)
+                print("saving %s"%(ofname))
+                ho=h5py.File(ofname,"w")
+                ho["pos_est"]=pos_est
+                ho["pos_err"]=error_std
+                ho["time"]=tnow
+                ho.close()
+
 
 
