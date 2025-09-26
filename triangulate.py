@@ -90,9 +90,9 @@ def file_name_to_datetime(fname):
     t0 = Time("%s-%s-%sT%s:%s:%s"%(year,month,day,hour,mins,sec), format='isot', scale='utc') #+ dt
     return(t0)
 
-def get_video():
+def get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.mat",camera_id="2165"):
     # Path to your video
-    video_path = "2025_02_19_03_44_00_000_012165.mp4"
+    
     cap = cv2.VideoCapture(video_path)
     #   cap2 = cv2.VideoCapture(video_path2)
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -101,9 +101,17 @@ def get_video():
     t0=file_name_to_datetime(video_path)
 #    print(t0.unix)
     #print(t0)
-    ams216=sio.loadmat("ams216.mat")
+    ams216=sio.loadmat(calfile)
     az=180*ams216["az"]/n.pi
     ze=180*ams216["ze"]/n.pi
+   # plt.imshow(az)
+   # plt.colorbar()
+  #  plt.show()
+
+  #  plt.imshow(ze)
+ #   plt.colorbar()
+#    plt.show()
+
     el=90-ze
     long=ams216["long_lat"][0,0]
     lat=ams216["long_lat"][0,1]
@@ -111,7 +119,7 @@ def get_video():
     obs=EarthLocation(lon=long,height=0,lat=lat)
     #dt = TimeDelta(dur/2.0,format="sec")
     #aa_frame = AltAz(obstime=t0+dt, location=obs)
-    return({"camera_id":"2165","az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
+    return({"camera_id":camera_id,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
 
 def xy_to_azel(az,el,x,y):
     return(az[int(x),int(y)],el[int(x),int(y)])
@@ -140,136 +148,177 @@ def get_video2():
     lat=53.1529
     # needed for star plotting
     obs=EarthLocation(lon=long,height=0,lat=lat)
-    return({"camera_id":"954","az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
+    return({"camera_id":"0954","az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
 
-v1=get_video()
-v2=get_video2()
+
+def triangulate_dual(v1,v2):
+    videos=[v1,v2]
+    # for overplotting stars
+    bs=bright_stars.bright_stars()
+
+    # find smallest t0 in videos
+    t0_min=n.min([v["t0"] for v in videos])
+    # find largest t1 in videos
+    t1_max=n.max([v["t1"] for v in videos])
+
+    dt = 1.0 # seconds between frames to sample
+
+    # go through all frames with dt spacing
+    n_frames = int((t1_max-t0_min)/dt)
+    fragment_ids={}
+    for fi in range(n_frames):
+        # time now in ms since t0_min
+        tnow = (t0_min + dt*fi)
+        # key for fragments dict
+        tnow_key=int(tnow*1000.0)
+        # go through all videos and ask user to mark fragments with keys 1-9
+        # tbd: figure out how to index more framents if needed...  
+        for v in videos:
+            idx = int((tnow - v["t0"])*v["fps"])
+            # if not in video range, skip
+            if idx < 0 or idx >= v["frame_count"]:
+                continue
+            # seek frame number idx
+            v["cap"].set(cv2.CAP_PROP_POS_FRAMES, idx)
+            # read frame
+            ret, frame = v["cap"].read()
+            # if we get a frame
+            if ret:
+                # Convert from BGR (OpenCV default) to RGB for plotting
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                # plot
+                fig, ax = plt.subplots(1,1)
+                ax.imshow(frame_rgb)
+                print("frame %d"%(idx))
+                ax.set_title(f"zoom and position cursor, then press fragment id number (1-9) ")#%(lat,long))
+                
+                # dont plot stars. useful for checking plate solve but slows things down
+                plot_stars=False
+                if plot_stars: 
+                    star_ys=[]
+                    star_xs=[]
+                    max_stars=500
+                    for i in range(max_stars):
+                        # plot bright stars 
+                        d=bs.get_ra_dec_vmag(i)
+                        c = SkyCoord(ra=d[0]*u.degree, dec=d[1]*u.degree, frame='icrs')
+                        aa_frame = AltAz(obstime=Time(tnow, format='unix'), location=v["obs"])
+                        altaz=c.transform_to(aa_frame)
+                        star_az=float(altaz.az/u.deg)
+                        star_el=float(altaz.alt/u.deg)
+                        # this is the slow part...
+                        # find closest pixel in az,el arrays
+                        # how to speed this up???
+                        x,y=n.unravel_index(n.argmin((180*n.angle(n.exp(1j*n.pi*star_az/180)*n.exp(-1j*n.pi*v["az"]/180))/n.pi)**2 + (star_el-v["el"])**2),v["el"].shape)
+                        if x > 0 and x < v["az"].shape[0] and y > 0 and y < v["az"].shape[1]:
+                            star_xs.append(x)
+                            star_ys.append(y)
+                    ax.scatter(star_ys,star_xs,s=80, facecolors='none', edgecolors='w',alpha=0.2)
+
+                def onkey(event):
+                    if event.key == "q":
+                        return 
+                    if event.inaxes != ax:
+                        return
+                    if event.inaxes == ax:
+                        # read cam 1 position
+                        x, y = int(event.xdata), int(event.ydata)
+                        taz,tel=xy_to_azel(v["az"],v["el"],y,x)
+                        if tnow_key not in v["fragments"].keys():
+                            v["fragments"][tnow_key]={}
+                        v["fragments"][tnow_key][int(event.key)]={"x":x,"y":y,"az":taz,"el":tel,"fragment_id":int(event.key)}
+                        # add record of fragment id
+                        if int(event.key) not in fragment_ids.keys():
+                            fragment_ids[int(event.key)]=1
+                        else:
+                            fragment_ids[int(event.key)]+=1
+
+                        print(v["fragments"][tnow_key][int(event.key)])##={"x":x,"y":y,"az":taz,"el":tel,"fragment_id":int(event.key)}
+
+                        ax.plot(x, y, "x", color="red",alpha=0.5)#
+                        ax.text(x,y,event.key,color="red",alpha=0.5)
+                        
+                        fig.canvas.draw()
+            fig.canvas.mpl_connect("key_press_event", onkey)
+            plt.show()
+        if True:
+            # triangulate all fragments seen by two cameras
+            for fid in fragment_ids.keys():
+                print("key %d"%(fid))
+                lats=[]
+                longs=[]
+                azs=[]
+                els=[]
+                cam_ids=[]
+                for v in videos:
+                    if (tnow_key in v["fragments"].keys()) and (fid in v["fragments"][tnow_key].keys()):
+                        cam_ids.append(v["camera_id"])
+                        lats.append(v["lat"])
+                        longs.append(v["long"])
+                        azs.append(v["fragments"][tnow_key][fid]["az"])
+                        els.append(v["fragments"][tnow_key][fid]["el"])    
+                if len(lats) == 2: # tbd: support more than two cameras in triangulate()
+                    print("triangulating fragement id %d"%(fid))
+                    pos_est,error_std=triangulate(azs,els,lats,longs)
+    #                v["fragments"][tnow_key][fid]["pos_est"]=pos_est
+
+                # save fragment data to hdf5 file with h5py
+                # only save if more than two cameras see it
+                id_str=""
+                if len(cam_ids) > 1:
+                    for cid in cam_ids:
+                        id_str=id_str + "_"+ cid
+                    ofname="fragments/%d%s_%s.h5"%(fid,id_str,tnow_key)
+                    print("saving %s"%(ofname))
+                    ho=h5py.File(ofname,"w")
+                    ho["pos_est"]=pos_est
+                    ho["pos_err"]=error_std
+                    ho["time"]=tnow
+                    ho.close()
+
+
+
+# 3:43:35 3:44:00
+# no stars.
+#/Users/jvi019/src/falcon9/2025_02_19_03_43_01_000_011011.mp4
+
+# 3:44-3:45
+v0=get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.mat",camera_id="2165")
+
+# 3:44-3:45:23
+v1=get_video2()
+
+# 3:45:00 - 3:46:00
+v2=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
+
+# 3:45:00 - 3:45:32
+v3=get_video(video_path = "2025_02_19_03_45_00_000_010125.mp4",calfile="ams21_5.mat",camera_id="0215")
+
+# 3:45:21-3:45:58 
+v4=get_video(video_path = "2025_02_19_03_45_00_000_010121.mp4",calfile="ams21_1.mat",camera_id="0211")
+
+# 3:45:10-3:45:28 
+#v5=get_video(video_path = "2025_02_19_03_45_01_000_010122.mp4",calfile="uncal.mat",camera_id="0211")
+# 3:45:49 - 3:46:01
+#v6=get_video(video_path = "2025_02_19_03_45_01_000_012333.mp4",calfile="uncal.mat",camera_id="0211")
+
+# 3:46:00 - 3:46:20
+#v7=get_video(video_path = "2025_02_19_03_46_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
+
+all_videos = [v0,v1,v2,v3,v4]
+for vi in range(len(all_videos)):
+    plt.plot(n.array([all_videos[vi]["t0"],all_videos[vi]["t1"]],"datetime64[s]"),[vi,vi],label="%d - %s"%(vi, all_videos[vi]["camera_id"]))
+plt.legend()
+plt.xlabel("Time")
+plt.show()
+
+triangulate_dual(v0,v1)
+triangulate_dual(v1,v2)
+triangulate_dual(v1,v3)
+triangulate_dual(v1,v4)
+triangulate_dual(v2,v3)
+triangulate_dual(v2,v4)
+triangulate_dual(v3,v4)
 
 # all videos to process
-videos = [v1,v2]
-
-# for overplotting stars
-bs=bright_stars.bright_stars()
-
-# find smallest t0 in videos
-t0_min=n.min([v["t0"] for v in videos])
-# find largest t1 in videos
-t1_max=n.max([v["t1"] for v in videos])
-
-dt = 1.0 # seconds between frames to sample
-
-# go through all frames with dt spacing
-n_frames = int((t1_max-t0_min)/dt)
-fragment_ids={}
-for fi in range(n_frames):
-    # time now in ms since t0_min
-    tnow = (t0_min + dt*fi)
-    # key for fragments dict
-    tnow_key=int(tnow*1000.0)
-    # go through all videos and ask user to mark fragments with keys 1-9
-    # tbd: figure out how to index more framents if needed...  
-    for v in videos:
-        idx = int((tnow - v["t0"])*v["fps"])
-        # if not in video range, skip
-        if idx < 0 or idx >= v["frame_count"]:
-            continue
-        # seek frame number idx
-        v["cap"].set(cv2.CAP_PROP_POS_FRAMES, idx)
-        # read frame
-        ret, frame = v["cap"].read()
-        # if we get a frame
-        if ret:
-            # Convert from BGR (OpenCV default) to RGB for plotting
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            # plot
-            fig, ax = plt.subplots(1,1)
-            ax.imshow(frame_rgb)
-            print("frame %d"%(idx))
-            ax.set_title(f"zoom and position cursor, then press fragment id number (1-9) ")#%(lat,long))
-            
-            # dont plot stars. useful for checking plate solve but slows things down
-            plot_stars=False
-            if plot_stars: 
-                star_ys=[]
-                star_xs=[]
-                max_stars=500
-                for i in range(max_stars):
-                    # plot bright stars 
-                    d=bs.get_ra_dec_vmag(i)
-                    c = SkyCoord(ra=d[0]*u.degree, dec=d[1]*u.degree, frame='icrs')
-                    aa_frame = AltAz(obstime=Time(tnow, format='unix'), location=v["obs"])
-                    altaz=c.transform_to(aa_frame)
-                    star_az=float(altaz.az/u.deg)
-                    star_el=float(altaz.alt/u.deg)
-                    # this is the slow part...
-                    # find closest pixel in az,el arrays
-                    # how to speed this up???
-                    x,y=n.unravel_index(n.argmin((180*n.angle(n.exp(1j*n.pi*star_az/180)*n.exp(-1j*n.pi*v["az"]/180))/n.pi)**2 + (star_el-v["el"])**2),v["el"].shape)
-                    if x > 0 and x < v["az"].shape[0] and y > 0 and y < v["az"].shape[1]:
-                        star_xs.append(x)
-                        star_ys.append(y)
-                ax.scatter(star_ys,star_xs,s=80, facecolors='none', edgecolors='w',alpha=0.2)
-
-            def onkey(event):
-                if event.key == "q":
-                    return 
-                if event.inaxes != ax:
-                    return
-                if event.inaxes == ax:
-                    # read cam 1 position
-                    x, y = int(event.xdata), int(event.ydata)
-                    taz,tel=xy_to_azel(v["az"],v["el"],y,x)
-                    if tnow_key not in v["fragments"].keys():
-                        v["fragments"][tnow_key]={}
-                    v["fragments"][tnow_key][int(event.key)]={"x":x,"y":y,"az":taz,"el":tel,"fragment_id":int(event.key)}
-                    # add record of fragment id
-                    if int(event.key) not in fragment_ids.keys():
-                        fragment_ids[int(event.key)]=1
-                    else:
-                        fragment_ids[int(event.key)]+=1
-
-                    print(v["fragments"][tnow_key][int(event.key)])##={"x":x,"y":y,"az":taz,"el":tel,"fragment_id":int(event.key)}
-
-                    ax.plot(x, y, "x", color="red",alpha=0.5)#
-                    ax.text(x,y,event.key,color="red",alpha=0.5)
-                    
-                    fig.canvas.draw()
-        fig.canvas.mpl_connect("key_press_event", onkey)
-        plt.show()
-    if True:
-        # triangulate all fragments seen by two cameras
-        for fid in fragment_ids.keys():
-            print("key %d"%(fid))
-            lats=[]
-            longs=[]
-            azs=[]
-            els=[]
-            cam_ids=[]
-            for v in videos:
-                if (tnow_key in v["fragments"].keys()) and (fid in v["fragments"][tnow_key].keys()):
-                    cam_ids.append(v["camera_id"])
-                    lats.append(v["lat"])
-                    longs.append(v["long"])
-                    azs.append(v["fragments"][tnow_key][fid]["az"])
-                    els.append(v["fragments"][tnow_key][fid]["el"])    
-            if len(lats) == 2: # tbd: support more than two cameras in triangulate()
-                print("triangulating fragement id %d"%(fid))
-                pos_est,error_std=triangulate(azs,els,lats,longs)
-#                v["fragments"][tnow_key][fid]["pos_est"]=pos_est
-
-            # save fragment data to hdf5 file with h5py
-            # only save if more than two cameras see it
-            id_str=""
-            if len(cam_ids) > 1:
-                for cid in cam_ids:
-                    id_str=id_str + "_"+ cid
-                ofname="fragments/%d%s_%s.h5"%(fid,id_str,tnow_key)
-                print("saving %s"%(ofname))
-                ho=h5py.File(ofname,"w")
-                ho["pos_est"]=pos_est
-                ho["pos_err"]=error_std
-                ho["time"]=tnow
-                ho.close()
-
-
-
+#videos = [v2,v4]
