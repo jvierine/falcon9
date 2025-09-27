@@ -4,6 +4,8 @@ import numpy as n
 import scipy.io as sio
 import bright_stars
 
+import numpy as np
+from scipy.spatial import KDTree
 
 from astropy import units as u
 from astropy.coordinates import Angle
@@ -25,6 +27,74 @@ import jcoord
 
 import matplotlib.pyplot as plt
 import h5py
+
+
+import numpy as np
+from astropy.coordinates import EarthLocation, AltAz, ITRS, CartesianRepresentation
+from astropy.time import Time
+import astropy.units as u
+
+
+
+def wrap_azimuth(az):
+    """
+    Wrap azimuth value(s) into [0, 360) degrees.
+    Works with scalars or numpy arrays.
+    """
+    return np.mod(az, 360)
+
+def create_kdtree(az,el):
+    """
+    create k-d tree from (az, el) pairs for fast nearest-neighbor lookup
+    1) flatten az,el arrays
+    2) build k-d tree from (az, el) pairs
+    3) also return flattened x,y arrays for pixel lookup
+    4) also return flattened az,el arrays for az,el lookup
+    5) return dict with tree, x,y, az,el
+    """
+    az=wrap_azimuth(az)
+    # Build k-d tree from (az, el) pairs
+    azf=az.flatten()
+    elf=el.flatten()
+    points = np.column_stack((azf, elf))
+    x=n.arange(az.shape[0])
+    y=n.arange(az.shape[1])
+    # why indexing="ij"???
+    xg,yg=n.meshgrid(x,y ,indexing="ij")
+    xg=xg.flatten()
+    yg=yg.flatten()
+    tree = KDTree(points)
+    return({"tree":tree,"x":xg,"y":yg,"az":azf,"el":elf})
+
+def interpolate_pixel(az_query, el_query, kd, az,el,k=4, p=2):
+    """
+    Map an arbitrary (az, el) to pixel (x, y) using inverse-distance weighting.
+    use kd tree to get nlog n search time
+    
+    Parameters:
+        az_query, el_query: query azimuth and elevation
+        k: number of nearest neighbors to use
+        p: distance power parameter (p=2 means inverse-square weighting)
+    """
+    tree=kd["tree"]
+    x=kd["x"]
+    y=kd["y"]
+    az_query=wrap_azimuth(az_query)
+    dist, idx = tree.query([az_query, el_query], k=k)
+
+    # Handle scalar vs. array case for k=1
+    if k == 1:
+        return x[idx], y[idx]
+
+    # Compute weights (inverse distance)
+    weights = 1 / (dist**p + 1e-12)  # small epsilon avoids divide-by-zero
+    weights /= np.sum(weights)
+    
+    # Interpolate pixel coordinates
+    x_interp = np.sum(x[idx] * weights)
+    y_interp = np.sum(y[idx] * weights)
+    
+    return x_interp, y_interp
 
 def triangulate(azs,els,lats,lons,plot_line_of_sight=False):
     """
@@ -68,7 +138,6 @@ def triangulate(azs,els,lats,lons,plot_line_of_sight=False):
     pos1=r1+xhat[1]*e1
     pos_est=0.5*(pos0+pos1)
     print(jcoord.ecef2geodetic(pos_est[0],pos_est[1],pos_est[2]))
-#    print(jcoord.ecef2geodetic(pos1[0],pos1[1],pos1[2]))
 
     print("shortest intersection %1.2f m distances %1.2f %1.2f km"%(n.linalg.norm(pos0-pos1),xhat[0]/1000.0,xhat[1]/1000.0))
     return(pos_est,n.linalg.norm(pos0-pos1))
@@ -113,13 +182,16 @@ def get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.
 #    plt.show()
 
     el=90-ze
+    # az,el -> x,y search tree
+    kd=create_kdtree(az,el)
+
     long=ams216["long_lat"][0,0]
     lat=ams216["long_lat"][0,1]
 
     obs=EarthLocation(lon=long,height=0,lat=lat)
     #dt = TimeDelta(dur/2.0,format="sec")
     #aa_frame = AltAz(obstime=t0+dt, location=obs)
-    return({"camera_id":camera_id,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
+    return({"camera_id":camera_id,"kd":kd,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
 
 def xy_to_azel(az,el,x,y):
     return(az[int(x),int(y)],el[int(x),int(y)])
@@ -146,10 +218,54 @@ def get_video2():
     # location
     long=8.1651
     lat=53.1529
+    # az,el -> x,y search tree
+    kd=create_kdtree(az,el)
+
     # needed for star plotting
     obs=EarthLocation(lon=long,height=0,lat=lat)
-    return({"camera_id":"0954","az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
+    return({"camera_id":"0954","kd":kd,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
 
+def fragment_positions():
+    fl=glob.glob("fragments/*.h5")
+    fl.sort()
+    fragment_geo_pos={}
+    fragment_time={}
+
+    for f in fl:
+        h=h5py.File(f,"r")
+        fid=re.search(r"fragments/(\d+)_.*\.h5",f).group(1)
+        pos_est=h["pos_est"][()]
+        if fid not in fragment_geo_pos.keys():
+            fragment_geo_pos[fid]=[]
+            fragment_time[fid]=[]
+
+#        print(pos_est)
+        fragment_geo_pos[fid].append(pos_est)
+        fragment_time[fid].append(h["time"][()])
+
+        h.close()
+    for fid in fragment_geo_pos.keys():
+        fragment_geo_pos[fid]=n.array(fragment_geo_pos[fid])
+        fragment_time[fid]=n.array(fragment_time[fid])
+    return(fragment_geo_pos,fragment_time)
+
+def fragment_azel(poss,video):
+
+    # Example: observer at latitude, longitude, height
+    lat = video["lat"]   # degrees (Tromsø, Norway for example)
+    lon = video["long"]   # degrees
+    h   = 0     # meters above sea level
+
+    observer = EarthLocation(lat=lat*u.deg, lon=lon*u.deg, height=h*u.m)
+    azs=[]
+    els=[]
+    for pos in poss:
+        llh=jcoord.ecef2geodetic(pos[0],pos[1],pos[2])
+        az_el_r=jcoord.geodetic_to_az_el_r(lat, lon, h, llh[0], llh[1], llh[2])
+        azs.append(az_el_r[0])
+        els.append(az_el_r[1])
+    return(azs,els)
+    
 
 def triangulate_dual(v1,v2):
     videos=[v1,v2]
@@ -162,6 +278,9 @@ def triangulate_dual(v1,v2):
     t1_max=n.max([v["t1"] for v in videos])
 
     dt = 1.0 # seconds between frames to sample
+
+    # load all fragment positions until now
+    fp,ft=fragment_positions()
 
     # go through all frames with dt spacing
     n_frames = int((t1_max-t0_min)/dt)
@@ -192,12 +311,12 @@ def triangulate_dual(v1,v2):
                 print("frame %d"%(idx))
                 ax.set_title(f"zoom and position cursor, then press fragment id number (1-9) ")#%(lat,long))
                 
-                # dont plot stars. useful for checking plate solve but slows things down
-                plot_stars=False
+                # plot stars. useful for checking that star calibration is correct
+                plot_stars=True
                 if plot_stars: 
                     star_ys=[]
                     star_xs=[]
-                    max_stars=500
+                    max_stars=100
                     for i in range(max_stars):
                         # plot bright stars 
                         d=bs.get_ra_dec_vmag(i)
@@ -209,11 +328,36 @@ def triangulate_dual(v1,v2):
                         # this is the slow part...
                         # find closest pixel in az,el arrays
                         # how to speed this up???
-                        x,y=n.unravel_index(n.argmin((180*n.angle(n.exp(1j*n.pi*star_az/180)*n.exp(-1j*n.pi*v["az"]/180))/n.pi)**2 + (star_el-v["el"])**2),v["el"].shape)
+                        #x,y=n.unravel_index(n.argmin((180*n.angle(n.exp(1j*n.pi*star_az/180)*n.exp(-1j*n.pi*v["az"]/180))/n.pi)**2 + (star_el-v["el"])**2),v["el"].shape)
+                        x,y=interpolate_pixel(star_az,star_el,v["kd"],v["az"],v["el"],k=4,p=2)
                         if x > 0 and x < v["az"].shape[0] and y > 0 and y < v["az"].shape[1]:
                             star_xs.append(x)
                             star_ys.append(y)
                     ax.scatter(star_ys,star_xs,s=80, facecolors='none', edgecolors='w',alpha=0.2)
+                show_fragments=True
+                if show_fragments:
+                    for frag in fp.keys():
+                        poss=fp[frag]
+                        ftimes=ft[frag]
+
+                        fazs,fels=fragment_azel(poss,v)
+                        frag_xs=[]
+                        frag_ys=[]
+                        for i in range(len(fazs)):
+                            x,y=interpolate_pixel(fazs[i],fels[i],v["kd"],v["az"],v["el"],k=4,p=2)
+                            #if x > 0 and x < v["az"].shape[0] and y > 0 and y < v["az"].shape[1]:
+                            frag_xs.append(x)
+                            frag_ys.append(y)
+                        frag_xs=n.array(frag_xs)
+                        frag_ys=n.array(frag_ys)
+                        hidx=n.where(ftimes < tnow)[0]
+                        fidx=n.where(ftimes >= tnow)[0]
+
+                        ax.plot(frag_ys[hidx],frag_xs[hidx],".",color="red",alpha=0.5)
+                        ax.plot(frag_ys[fidx],frag_xs[fidx],".",color="green",alpha=0.5)
+
+#                        for i in range(len(frag_xs)):
+ #                           ax.text(frag_ys[i],frag_xs[i],frag,color="red",alpha=0.5)
 
                 def onkey(event):
                     if event.key == "q":
@@ -260,6 +404,10 @@ def triangulate_dual(v1,v2):
                 if len(lats) == 2: # tbd: support more than two cameras in triangulate()
                     print("triangulating fragement id %d"%(fid))
                     pos_est,error_std=triangulate(azs,els,lats,longs)
+                    if error_std < 1e3:
+                        # update list to plot newly created fragment positions
+                        fp[fid].append(pos_est)
+                        ft[fid].append(tnow)
     #                v["fragments"][tnow_key][fid]["pos_est"]=pos_est
 
                 # save fragment data to hdf5 file with h5py
