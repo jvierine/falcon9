@@ -34,6 +34,9 @@ from astropy.coordinates import EarthLocation, AltAz, ITRS, CartesianRepresentat
 from astropy.time import Time
 import astropy.units as u
 
+# Get default color cycle
+prop_cycle = plt.rcParams['axes.prop_cycle']
+colors = prop_cycle.by_key()['color']
 
 
 def wrap_azimuth(az):
@@ -95,6 +98,33 @@ def interpolate_pixel(az_query, el_query, kd, az,el,k=4, p=2):
     y_interp = np.sum(y[idx] * weights)
     
     return x_interp, y_interp
+
+
+
+def line_of_sight(az,el,video1,video2,dl=5e3,L=2000e3):
+    """ get pixels x,y corresponding to line of sight vector from camera1 with az,el
+    as seen from camera2. 
+    """
+    n_segments=int(L/dl)
+    pos1=jcoord.geodetic2ecef(video1["lat"],video1["long"],video1["h"])
+    e0=jcoord.azel_ecef(video1["lat"],video1["long"],video1["h"],az,el)
+    # az and el for camera2
+    v2x=[]
+    v2y=[]
+    for i in range(n_segments):
+        pos = pos1 + e0*i*dl
+        target_llh=jcoord.ecef2geodetic(pos[0], pos[1], pos[2])
+#        print(target_llh)
+        aer=jcoord.geodetic_to_az_el_r(video2["lat"],video2["long"],video2["h"],target_llh[0],target_llh[1],target_llh[2])
+ #       print(aer)
+        x,y=interpolate_pixel(aer[0], aer[1], video2["kd"], video2["az"], video2["el"],k=4, p=2)
+        v2x.append(x)
+        v2y.append(y)
+
+    return(n.array(v2x),n.array(v2y))
+
+    #pos1=jcoord.az(video["lat"],video1["long"],video1["h"])
+
 
 def triangulate(azs,els,lats,lons,plot_line_of_sight=False):
     """
@@ -191,7 +221,7 @@ def get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.
     obs=EarthLocation(lon=long,height=0,lat=lat)
     #dt = TimeDelta(dur/2.0,format="sec")
     #aa_frame = AltAz(obstime=t0+dt, location=obs)
-    return({"camera_id":camera_id,"kd":kd,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
+    return({"camera_id":camera_id,"kd":kd,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"h":0,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
 
 def xy_to_azel(az,el,x,y):
     return(az[int(x),int(y)],el[int(x),int(y)])
@@ -223,7 +253,7 @@ def get_video2():
 
     # needed for star plotting
     obs=EarthLocation(lon=long,height=0,lat=lat)
-    return({"camera_id":"0954","kd":kd,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
+    return({"camera_id":"0954","kd":kd,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"h":0,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
 
 def fragment_positions():
     fl=glob.glob("fragments/*.h5")
@@ -355,6 +385,27 @@ def triangulate_dual(v1,v2):
 
                         ax.plot(frag_ys[hidx],frag_xs[hidx],".",color="red",alpha=0.5)
                         ax.plot(frag_ys[fidx],frag_xs[fidx],".",color="green",alpha=0.5)
+                show_line_of_sight=True
+                if show_line_of_sight:
+                    print("los")
+                    if v == v2:
+                        # do we have a position in camera1 
+                        for fid in fragment_ids.keys():
+                            print(fid)
+                            if (tnow_key in v1["fragments"].keys()) and (fid in v1["fragments"][tnow_key].keys()):
+                                # this is the az and el 
+                                taz=v1["fragments"][tnow_key][fid]["az"]
+                                tel=v1["fragments"][tnow_key][fid]["el"]
+  #                              print("az",taz)
+   #                             print("el",tel)
+    #                            ={"x":x,"y":y,"az":taz,"el":tel,"fragment_id":int(event.key)}
+                                lx,ly=line_of_sight(taz,tel,v1,v2,dl=5e3,L=1200e3)
+#                                print(ly)
+ #                               print(lx)
+                                ax.plot(ly,lx,color="white",alpha=0.1)
+                            else:
+                                print("key",fid,"not in fragments")
+
 
 #                        for i in range(len(frag_xs)):
  #                           ax.text(frag_ys[i],frag_xs[i],frag,color="red",alpha=0.5)
@@ -385,6 +436,7 @@ def triangulate_dual(v1,v2):
                         fig.canvas.draw()
             fig.canvas.mpl_connect("key_press_event", onkey)
             plt.show()
+        
         if True:
             # triangulate all fragments seen by two cameras
             for fid in fragment_ids.keys():
@@ -404,10 +456,10 @@ def triangulate_dual(v1,v2):
                 if len(lats) == 2: # tbd: support more than two cameras in triangulate()
                     print("triangulating fragement id %d"%(fid))
                     pos_est,error_std=triangulate(azs,els,lats,longs)
-                    if error_std < 1e3:
+                    #if error_std < 1e3:
                         # update list to plot newly created fragment positions
-                        fp[fid].append(pos_est)
-                        ft[fid].append(tnow)
+                     #   fp[fid].append(pos_est)
+                      #  ft[fid].append(tnow)
     #                v["fragments"][tnow_key][fid]["pos_est"]=pos_est
 
                 # save fragment data to hdf5 file with h5py
@@ -445,6 +497,13 @@ v3=get_video(video_path = "2025_02_19_03_45_00_000_010125.mp4",calfile="ams21_5.
 # 3:45:21-3:45:58 
 v4=get_video(video_path = "2025_02_19_03_45_00_000_010121.mp4",calfile="ams21_1.mat",camera_id="0211")
 
+# 3:45:00 - 3:45:26
+# don't need this yet.
+#v5=get_video(video_path="2025_02_19_03_45_00_000_010624.mp4",calfile="ams0624.mat",camera_id="0624")
+
+# 3:45:30 - 3:46:00
+#v5=get_video(video_path="2025_02_19_03_45_00_000_010761.mp4",calfile="ams0761.mat",camera_id="0761")
+
 # 3:45:10-3:45:28 
 #v5=get_video(video_path = "2025_02_19_03_45_01_000_010122.mp4",calfile="uncal.mat",camera_id="0211")
 # 3:45:49 - 3:46:01
@@ -452,7 +511,7 @@ v4=get_video(video_path = "2025_02_19_03_45_00_000_010121.mp4",calfile="ams21_1.
 
 # 3:46:00 - 3:46:20
 #v7=get_video(video_path = "2025_02_19_03_46_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
-
+#/Users/jvi019/src/falcon9/2025_02_19_03_45_01_000_010122.mp4
 all_videos = [v0,v1,v2,v3,v4]
 for vi in range(len(all_videos)):
     plt.plot(n.array([all_videos[vi]["t0"],all_videos[vi]["t1"]],"datetime64[s]"),[vi,vi],label="%d - %s"%(vi, all_videos[vi]["camera_id"]))
@@ -466,7 +525,8 @@ triangulate_dual(v1,v3)
 triangulate_dual(v1,v4)
 triangulate_dual(v2,v3)
 triangulate_dual(v2,v4)
-triangulate_dual(v3,v4)
+# this is the same location. no use triangulating as we don't have two field of views!
+#triangulate_dual(v3,v4)
 
 # all videos to process
 #videos = [v2,v4]
