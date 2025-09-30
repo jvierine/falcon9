@@ -1,0 +1,59 @@
+AMS21:
+
+        "device_lng": "8.7017778",
+        "device_lat": "52.123639",
+        "device_alt": "120",
+
+AMS233:
+
+        "device_lng": "10.14494",
+        "device_lat": "53.62098",
+        "device_alt": "30",
+
+AMS34:
+
+        "device_lng": "9.982645",
+        "device_lat": "54.4044183",
+        "device_alt": "28"
+
+AMS36:
+
+        "device_lng": "11.016099",
+        "device_lat": "50.875250",
+        "device_alt": "267",
+
+AMS88:
+
+        "device_lng": "14.27944",
+        "device_lat": "51.44925",
+        "device_alt": "126",
+
+AMS22:
+
+        "device_lng": "14.121517",
+        "device_lat": "52.208667",
+        "device_alt": "145"
+
+AMS250:
+
+        "device_lng": "17.0747222",
+        "device_lat": "52.2769444",
+        "device_alt": "95",
+
+AMS35:
+
+        "device_lng": "11.325496",
+        "device_lat": "53.220087",
+        "device_alt": "41",
+
+AMS55:
+
+        "device_lng": "13.012797",
+        "device_lat": "50.6738",
+        "device_alt": "515",
+
+AMS95:
+
+        "device_lng": "8.1651",
+        "device_lat": "53.1529",
+        "device_alt": "30",
