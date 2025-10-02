@@ -176,7 +176,7 @@ def file_name_to_datetime(fname):
     """
     Read date from file name. assume integrated over dt seconds starting at file print time
     """
-    res=re.search(".*(....)_(..)_(..)_(..)_(..)_(..)_(...)_(......).mp4.*",fname)
+    res=re.search(".*(....)_(..)_(..)_(..)_(..)_(..)_(...)_(......).*.mp4.*",fname)
     # '2010-01-01T00:00:00'
     year=res.group(1)
     month=res.group(2)
@@ -189,7 +189,7 @@ def file_name_to_datetime(fname):
     t0 = Time("%s-%s-%sT%s:%s:%s"%(year,month,day,hour,mins,sec), format='isot', scale='utc') #+ dt
     return(t0)
 
-def get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.mat",camera_id="2165"):
+def get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.mat",camera_id="2165",h=0,flip=False):
     # Path to your video
     
     cap = cv2.VideoCapture(video_path)
@@ -201,27 +201,56 @@ def get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.
 #    print(t0.unix)
     #print(t0)
     ams216=sio.loadmat(calfile)
-    az=180*ams216["az"]/n.pi
-    ze=180*ams216["ze"]/n.pi
-   # plt.imshow(az)
-   # plt.colorbar()
-  #  plt.show()
+    az=ams216["az"]
+    el=n.pi/2.0-ams216["ze"]
 
-  #  plt.imshow(ze)
- #   plt.colorbar()
-#    plt.show()
 
-    el=90-ze
+    if False:
+        plt.imshow(180*wrap_azimuth(az)/n.pi)
+        plt.colorbar()
+        plt.show()
+
+        plt.imshow(180*el/n.pi)
+        plt.colorbar()
+        plt.show()
+
+
+    if flip:
+        # Björn's calibration has a degneracy, which sometimes allows flipped line of sight!!!
+        no=n.cos( -az )*n.cos(el)
+        ea=n.sin( az )*n.cos(el)
+        up=n.sin(el)
+    
+        no=-no
+        ea=-ea
+        up=-up
+
+        el=n.arcsin(up)
+        az=-n.arccos(no/n.cos(el))
+
+
+    az=180*az/n.pi
+    el=180*el/n.pi
+
+    if False:
+        plt.imshow(wrap_azimuth(az))
+        plt.colorbar()
+        plt.show()
+
+        plt.imshow(el)
+        plt.colorbar()
+        plt.show()
+
+#    el=90-ze
     # az,el -> x,y search tree
     kd=create_kdtree(az,el)
 
     long=ams216["long_lat"][0,0]
     lat=ams216["long_lat"][0,1]
-
-    obs=EarthLocation(lon=long,height=0,lat=lat)
+    obs=EarthLocation(lon=long,height=h,lat=lat)
     #dt = TimeDelta(dur/2.0,format="sec")
     #aa_frame = AltAz(obstime=t0+dt, location=obs)
-    return({"camera_id":camera_id,"kd":kd,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"h":0,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
+    return({"camera_id":camera_id,"kd":kd,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"h":h,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
 
 def xy_to_azel(az,el,x,y):
     return(az[int(x),int(y)],el[int(x),int(y)])
@@ -295,7 +324,29 @@ def fragment_azel(poss,video):
         azs.append(az_el_r[0])
         els.append(az_el_r[1])
     return(azs,els)
-    
+
+def plot_star_pos(ax,bs,tnow,v):
+    star_ys=[]
+    star_xs=[]
+    max_stars=100
+    for i in range(max_stars):
+        # plot bright stars 
+        d=bs.get_ra_dec_vmag(i)
+        c = SkyCoord(ra=d[0]*u.degree, dec=d[1]*u.degree, frame='icrs')
+        aa_frame = AltAz(obstime=Time(tnow, format='unix'), location=v["obs"])
+        altaz=c.transform_to(aa_frame)
+        star_az=float(altaz.az/u.deg)
+        star_el=float(altaz.alt/u.deg)
+        
+        # this is the slow part...
+        # find closest pixel in az,el arrays
+        # how to speed this up???
+        #x,y=n.unravel_index(n.argmin((180*n.angle(n.exp(1j*n.pi*star_az/180)*n.exp(-1j*n.pi*v["az"]/180))/n.pi)**2 + (star_el-v["el"])**2),v["el"].shape)
+        x,y=interpolate_pixel(star_az,star_el,v["kd"],v["az"],v["el"],k=4,p=2)
+        if x > 0 and x < v["az"].shape[0] and y > 0 and y < v["az"].shape[1]:
+            star_xs.append(x)
+            star_ys.append(y)
+    ax.scatter(star_ys,star_xs,s=80, facecolors='none', edgecolors='w',alpha=0.2)
 
 def triangulate_dual(v1,v2):
     videos=[v1,v2]
@@ -336,36 +387,21 @@ def triangulate_dual(v1,v2):
                 # Convert from BGR (OpenCV default) to RGB for plotting
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 # plot
-                fig, ax = plt.subplots(1,1)
+                fig, ax = plt.subplots(1,1,figsize=(8*1.4,6.4*1.1))
                 ax.imshow(frame_rgb)
                 print("frame %d"%(idx))
                 ax.set_title(f"zoom and position cursor, then press fragment id number (1-9) ")#%(lat,long))
                 
                 # plot stars. useful for checking that star calibration is correct
                 plot_stars=True
-                if plot_stars: 
-                    star_ys=[]
-                    star_xs=[]
-                    max_stars=100
-                    for i in range(max_stars):
-                        # plot bright stars 
-                        d=bs.get_ra_dec_vmag(i)
-                        c = SkyCoord(ra=d[0]*u.degree, dec=d[1]*u.degree, frame='icrs')
-                        aa_frame = AltAz(obstime=Time(tnow, format='unix'), location=v["obs"])
-                        altaz=c.transform_to(aa_frame)
-                        star_az=float(altaz.az/u.deg)
-                        star_el=float(altaz.alt/u.deg)
-                        # this is the slow part...
-                        # find closest pixel in az,el arrays
-                        # how to speed this up???
-                        #x,y=n.unravel_index(n.argmin((180*n.angle(n.exp(1j*n.pi*star_az/180)*n.exp(-1j*n.pi*v["az"]/180))/n.pi)**2 + (star_el-v["el"])**2),v["el"].shape)
-                        x,y=interpolate_pixel(star_az,star_el,v["kd"],v["az"],v["el"],k=4,p=2)
-                        if x > 0 and x < v["az"].shape[0] and y > 0 and y < v["az"].shape[1]:
-                            star_xs.append(x)
-                            star_ys.append(y)
-                    ax.scatter(star_ys,star_xs,s=80, facecolors='none', edgecolors='w',alpha=0.2)
+                if plot_stars:
+                    plot_star_pos(ax,bs,tnow,v)
+
+
                 show_fragments=True
                 if show_fragments:
+                    # reload
+                    fp,ft=fragment_positions()
                     for frag in fp.keys():
                         poss=fp[frag]
                         ftimes=ft[frag]
@@ -384,7 +420,11 @@ def triangulate_dual(v1,v2):
                         fidx=n.where(ftimes >= tnow)[0]
 
                         ax.plot(frag_ys[hidx],frag_xs[hidx],".",color="red",alpha=0.5)
+                        if len(hidx)>0:
+                            last_i=n.argmax(ftimes[hidx])
+                            ax.text(frag_ys[hidx[last_i]],frag_xs[hidx[last_i]],"%s"%(frag),color="red")
                         ax.plot(frag_ys[fidx],frag_xs[fidx],".",color="green",alpha=0.5)
+                        
                 show_line_of_sight=True
                 if show_line_of_sight:
                     print("los")
@@ -456,11 +496,6 @@ def triangulate_dual(v1,v2):
                 if len(lats) == 2: # tbd: support more than two cameras in triangulate()
                     print("triangulating fragement id %d"%(fid))
                     pos_est,error_std=triangulate(azs,els,lats,longs)
-                    #if error_std < 1e3:
-                        # update list to plot newly created fragment positions
-                     #   fp[fid].append(pos_est)
-                      #  ft[fid].append(tnow)
-    #                v["fragments"][tnow_key][fid]["pos_est"]=pos_est
 
                 # save fragment data to hdf5 file with h5py
                 # only save if more than two cameras see it
@@ -478,55 +513,102 @@ def triangulate_dual(v1,v2):
 
 
 
+# 3:45:00 - 3:45:26 
+# flipped cal!
+#v6=get_video(video_path="2025_02_19_03_45_00_000_010624.mp4",calfile="624.mat",camera_id="0624",flip=True)
+# 3:45:00 - 3:45:32
+#v3=get_video(video_path = "2025_02_19_03_45_00_000_010125.mp4",calfile="ams21_5.mat",camera_id="0215")
+# 3:44-3:45:23
+#v1=get_video2()
+
+# 3:44-3:45
+#v0=get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.mat",camera_id="2165")
+
+# 3:45:30 - 3:46:00
+#v5=get_video(video_path="2025_02_19_03_45_00_000_010761.mp4",calfile="ams_761.mat",camera_id="0761")
+
+# 3:45:21-3:45:58 (most likely bad calibration!!!)
+#v4=get_video(video_path = "2025_02_19_03_45_00_000_010121.mp4",calfile="ams21_1.mat",camera_id="0211")
+
+# 3:45:00 - 3:46:00. low elevation
+#v2=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
+
+# 3:46:00 - 3:46:20
+#v7=get_video(video_path = "2025_02_19_03_46_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
+
+# 3:46:00 - 3:47:00
+# 2025_02_19_03_46_00_000_010880.mp4
+v8=get_video(video_path = "2025_02_19_03_46_00_000_010880.mp4",calfile="0881.mat",camera_id="0881",flip=False)
+
+# 3:46:00 - 3:46:42 (good)
+# 2025_02_19_03_46_01_000_010031_ams0221.mp4
+#v9=get_video(video_path = "2025_02_19_03_46_01_000_010031.mp4",calfile="0221.mat",camera_id="0221",flip=False)
+
+
+# 3:46:37 - 3:47:00
+v10=get_video(video_path = "2025_02_19_03_46_01_000_010028.mp4",calfile="0228.mat",camera_id="0228",flip=False)
+
+
+# 3:47:01 - 3:47:30 (until no longer observable)
+#v11=get_video(video_path = "2025_02_19_03_47_01_000_010881_ams0882.mp4",calfile="0882.mat",camera_id="0882",flip=False)
+# 3:47:00 - 3:47:30 (until not longer observable)
+#v12=get_video(video_path = "2025_02_19_03_47_01_000_010028_ams0228.mp4",calfile="0228.mat",camera_id="0228",flip=False)
+
+# 3:46:07 - 3:46:43
+# 2025_02_19_03_46_00_000_010096.mp4
+
+# 3:46:10 - 3:46:50
+# 2025_02_19_03_46_00_000_012386.mp4
+
+# 3:46:10 - 3:47:00 (good)
+# 2025_02_19_03_46_01_000_010074_ams0352.mp4
+
+
+#triangulate_dual(v6,v3)
+#triangulate_dual(v6,v1)
+#triangulate_dual(v0,v1)
+#triangulate_dual(v3,v5)
+#triangulate_dual(v5,v4)
+#triangulate_dual(v5,v2)
+#triangulate_dual(v8,v9)
+triangulate_dual(v8,v10)
+#triangulate_dual(v11,v12)
+
+exit(0)
+
+#triangulate_dual(v2,v5)
+
+#triangulate_dual(v0,v1)
+#triangulate_dual(v1,v2)
+#triangulate_dual(v1,v3)
+#triangulate_dual(v1,v4)
+#triangulate_dual(v2,v3)
+#triangulate_dual(v2,v4)
+# this is the same location. no use triangulating as we don't have two field of views!
+#triangulate_dual(v3,v4)
+
+
+
 # 3:43:35 3:44:00
 # no stars.
 #/Users/jvi019/src/falcon9/2025_02_19_03_43_01_000_011011.mp4
 
-# 3:44-3:45
-v0=get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.mat",camera_id="2165")
 
-# 3:44-3:45:23
-v1=get_video2()
 
-# 3:45:00 - 3:46:00
-v2=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
 
-# 3:45:00 - 3:45:32
-v3=get_video(video_path = "2025_02_19_03_45_00_000_010125.mp4",calfile="ams21_5.mat",camera_id="0215")
 
-# 3:45:21-3:45:58 
-v4=get_video(video_path = "2025_02_19_03_45_00_000_010121.mp4",calfile="ams21_1.mat",camera_id="0211")
 
-# 3:45:00 - 3:45:26
-# don't need this yet.
-#v5=get_video(video_path="2025_02_19_03_45_00_000_010624.mp4",calfile="ams0624.mat",camera_id="0624")
-
-# 3:45:30 - 3:46:00
-#v5=get_video(video_path="2025_02_19_03_45_00_000_010761.mp4",calfile="ams0761.mat",camera_id="0761")
 
 # 3:45:10-3:45:28 
 #v5=get_video(video_path = "2025_02_19_03_45_01_000_010122.mp4",calfile="uncal.mat",camera_id="0211")
 # 3:45:49 - 3:46:01
 #v6=get_video(video_path = "2025_02_19_03_45_01_000_012333.mp4",calfile="uncal.mat",camera_id="0211")
 
-# 3:46:00 - 3:46:20
-#v7=get_video(video_path = "2025_02_19_03_46_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
 #/Users/jvi019/src/falcon9/2025_02_19_03_45_01_000_010122.mp4
-all_videos = [v0,v1,v2,v3,v4]
-for vi in range(len(all_videos)):
-    plt.plot(n.array([all_videos[vi]["t0"],all_videos[vi]["t1"]],"datetime64[s]"),[vi,vi],label="%d - %s"%(vi, all_videos[vi]["camera_id"]))
-plt.legend()
-plt.xlabel("Time")
-plt.show()
+def plot_videos(all_videos=[v0,v1,v2,v3,v4,v5]):
+    for vi in range(len(all_videos)):
+        plt.plot(n.array([all_videos[vi]["t0"],all_videos[vi]["t1"]],"datetime64[s]"),[vi,vi],label="%d - %s"%(vi, all_videos[vi]["camera_id"]))
+    plt.legend()
+    plt.xlabel("Time")
+    plt.show()
 
-triangulate_dual(v0,v1)
-triangulate_dual(v1,v2)
-triangulate_dual(v1,v3)
-triangulate_dual(v1,v4)
-triangulate_dual(v2,v3)
-triangulate_dual(v2,v4)
-# this is the same location. no use triangulating as we don't have two field of views!
-#triangulate_dual(v3,v4)
-
-# all videos to process
-#videos = [v2,v4]
