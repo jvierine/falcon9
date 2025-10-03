@@ -53,8 +53,15 @@ plt.subplot(111)
 for fp in range(len(fragment_pos)):
     # convert times to datetime64
     datetime=n.array(fragment_times[fp],dtype="datetime64[s]")
-
-    plt.errorbar(datetime,fragment_geo_pos[fp][:,2]/1e3,yerr=2*fragment_pos_err[fp]/1e3,label="%d"%(fragment_ids[fp]))
+    plt.errorbar(
+        datetime,
+        fragment_geo_pos[fp][:,2]/1e3,
+        yerr=2*fragment_pos_err[fp]/1e3,
+        fmt='o',          # circle markers
+        linestyle='none', # no line connecting them
+        label="%d" % (fragment_ids[fp])
+    )
+#    plt.errorbar(datetime,fragment_geo_pos[fp][:,2]/1e3,yerr=2*fragment_pos_err[fp]/1e3,label="%d"%(fragment_ids[fp]))
 plt.xlabel("unix time (s)")
 plt.ylabel("height (m)")
 plt.title("Fragment heights over time")
@@ -72,7 +79,7 @@ ax.add_feature(cfeature.BORDERS, linestyle=':')
 ax.add_feature(cfeature.LAKES, alpha=0.5)
 ax.add_feature(cfeature.RIVERS)
 for fp in range(len(fragment_pos)):
-    plt.plot(fragment_geo_pos[fp][:,1],fragment_geo_pos[fp][:,0],label="%d"%(fragment_ids[fp]))
+    plt.plot(fragment_geo_pos[fp][:,1],fragment_geo_pos[fp][:,0],".",label="%d"%(fragment_ids[fp]))
 plt.xlabel("Longitude")
 plt.ylabel("Latitude")
 plt.title("Fragment ground tracks")

@@ -189,7 +189,7 @@ def file_name_to_datetime(fname):
     t0 = Time("%s-%s-%sT%s:%s:%s"%(year,month,day,hour,mins,sec), format='isot', scale='utc') #+ dt
     return(t0)
 
-def get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.mat",camera_id="2165",h=0,flip=False):
+def get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",dt=0,calfile="ams216.mat",camera_id="2165",h=0,flip=False):
     # Path to your video
     
     cap = cv2.VideoCapture(video_path)
@@ -250,7 +250,7 @@ def get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.
     obs=EarthLocation(lon=long,height=h,lat=lat)
     #dt = TimeDelta(dur/2.0,format="sec")
     #aa_frame = AltAz(obstime=t0+dt, location=obs)
-    return({"camera_id":camera_id,"kd":kd,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"h":h,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
+    return({"camera_id":camera_id,"kd":kd,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"h":h,"t0":t0.unix+dt,"t1":t0.unix+dur+dt,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
 
 def xy_to_azel(az,el,x,y):
     return(az[int(x),int(y)],el[int(x),int(y)])
@@ -512,23 +512,24 @@ def triangulate_dual(v1,v2):
                     ho.close()
 
 
+# 3:44-3:45:23. Fragments: 1,2
+#v1=get_video2()
+# 3:44-3:45 Fragments: 1,2
+#v0=get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.mat",camera_id="2165")
 
 # 3:45:00 - 3:45:26 
 # flipped cal!
 #v6=get_video(video_path="2025_02_19_03_45_00_000_010624.mp4",calfile="624.mat",camera_id="0624",flip=True)
+
 # 3:45:00 - 3:45:32
 #v3=get_video(video_path = "2025_02_19_03_45_00_000_010125.mp4",calfile="ams21_5.mat",camera_id="0215")
-# 3:44-3:45:23
-#v1=get_video2()
 
-# 3:44-3:45
-#v0=get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.mat",camera_id="2165")
 
-# 3:45:30 - 3:46:00
+# 3:45:30 - 3:46:00 (calibration might be off near horizon)
 #v5=get_video(video_path="2025_02_19_03_45_00_000_010761.mp4",calfile="ams_761.mat",camera_id="0761")
 
-# 3:45:21-3:45:58 (most likely bad calibration!!!)
-#v4=get_video(video_path = "2025_02_19_03_45_00_000_010121.mp4",calfile="ams21_1.mat",camera_id="0211")
+# 3:45:21-3:45:58 (most likely bad timing?)
+#v4=get_video(video_path = "2025_02_19_03_45_00_000_010121.mp4",dt=0.5,calfile="ams21_1.mat",camera_id="0211")
 
 # 3:45:00 - 3:46:00. low elevation
 #v2=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
@@ -538,7 +539,7 @@ def triangulate_dual(v1,v2):
 
 # 3:46:00 - 3:47:00
 # 2025_02_19_03_46_00_000_010880.mp4
-v8=get_video(video_path = "2025_02_19_03_46_00_000_010880.mp4",calfile="0881.mat",camera_id="0881",flip=False)
+#v8=get_video(video_path = "2025_02_19_03_46_00_000_010880.mp4",calfile="0881.mat",h=126,camera_id="0881",flip=False)
 
 # 3:46:00 - 3:46:42 (good)
 # 2025_02_19_03_46_01_000_010031_ams0221.mp4
@@ -546,13 +547,13 @@ v8=get_video(video_path = "2025_02_19_03_46_00_000_010880.mp4",calfile="0881.mat
 
 
 # 3:46:37 - 3:47:00
-v10=get_video(video_path = "2025_02_19_03_46_01_000_010028.mp4",calfile="0228.mat",camera_id="0228",flip=False)
+#v10=get_video(video_path = "2025_02_19_03_46_01_000_010028.mp4",dt=-0.8,calfile="0228.mat",h=145,camera_id="0228",flip=False)
 
 
 # 3:47:01 - 3:47:30 (until no longer observable)
-#v11=get_video(video_path = "2025_02_19_03_47_01_000_010881_ams0882.mp4",calfile="0882.mat",camera_id="0882",flip=False)
+v11=get_video(video_path = "2025_02_19_03_47_01_000_010881_ams0882.mp4",calfile="0882.mat",camera_id="0882",flip=False)
 # 3:47:00 - 3:47:30 (until not longer observable)
-#v12=get_video(video_path = "2025_02_19_03_47_01_000_010028_ams0228.mp4",calfile="0228.mat",camera_id="0228",flip=False)
+v12=get_video(video_path = "2025_02_19_03_47_01_000_010028_ams0228.mp4",dt=-0.8,calfile="0228.mat",camera_id="0228",flip=False)
 
 # 3:46:07 - 3:46:43
 # 2025_02_19_03_46_00_000_010096.mp4
@@ -563,15 +564,22 @@ v10=get_video(video_path = "2025_02_19_03_46_01_000_010028.mp4",calfile="0228.ma
 # 3:46:10 - 3:47:00 (good)
 # 2025_02_19_03_46_01_000_010074_ams0352.mp4
 
-
-#triangulate_dual(v6,v3)
-#triangulate_dual(v6,v1)
 #triangulate_dual(v0,v1)
+#triangulate_dual(v1,v6)
+#triangulate_dual(v6,v3)
+#triangulate_dual(v3,v5)
+#triangulate_dual(v4,v5)
+#triangulate_dual(v5,v2)
+#triangulate_dual(v8,v9)
+#triangulate_dual(v8,v10)
+triangulate_dual(v11,v12)
+
+#triangulate_dual(v6,v1)
 #triangulate_dual(v3,v5)
 #triangulate_dual(v5,v4)
 #triangulate_dual(v5,v2)
 #triangulate_dual(v8,v9)
-triangulate_dual(v8,v10)
+#triangulate_dual(v8,v10)
 #triangulate_dual(v11,v12)
 
 exit(0)
