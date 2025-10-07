@@ -427,28 +427,19 @@ def triangulate_dual(v1,v2):
                         
                 show_line_of_sight=True
                 if show_line_of_sight:
-                    print("los")
                     if v == v2:
                         # do we have a position in camera1 
                         for fid in fragment_ids.keys():
-                            print(fid)
                             if (tnow_key in v1["fragments"].keys()) and (fid in v1["fragments"][tnow_key].keys()):
-                                # this is the az and el 
+                                # this is the az and el selected in previous video 
                                 taz=v1["fragments"][tnow_key][fid]["az"]
                                 tel=v1["fragments"][tnow_key][fid]["el"]
-  #                              print("az",taz)
-   #                             print("el",tel)
-    #                            ={"x":x,"y":y,"az":taz,"el":tel,"fragment_id":int(event.key)}
+                                # draw a line of sight guide line in video two based on 
+                                # annotations in previous video
                                 lx,ly=line_of_sight(taz,tel,v1,v2,dl=5e3,L=1200e3)
-#                                print(ly)
- #                               print(lx)
                                 ax.plot(ly,lx,color="white",alpha=0.1)
                             else:
                                 print("key",fid,"not in fragments")
-
-
-#                        for i in range(len(frag_xs)):
- #                           ax.text(frag_ys[i],frag_xs[i],frag,color="red",alpha=0.5)
 
                 def onkey(event):
                     if event.key == "q":
@@ -519,20 +510,25 @@ def triangulate_dual(v1,v2):
 
 # 3:45:00 - 3:45:26 
 # flipped cal!
+# 6 fragments. nice top fragment!
 #v6=get_video(video_path="2025_02_19_03_45_00_000_010624.mp4",calfile="624.mat",camera_id="0624",flip=True)
 
 # 3:45:00 - 3:45:32
+# 5 fragments. okay top fragment.
 #v3=get_video(video_path = "2025_02_19_03_45_00_000_010125.mp4",calfile="ams21_5.mat",camera_id="0215")
 
 
 # 3:45:30 - 3:46:00 (calibration might be off near horizon)
-#v5=get_video(video_path="2025_02_19_03_45_00_000_010761.mp4",calfile="ams_761.mat",camera_id="0761")
+# 5 fragments. ok top
+v5=get_video(video_path="2025_02_19_03_45_00_000_010761.mp4",calfile="ams_761.mat",camera_id="0761")
 
 # 3:45:21-3:45:58 (most likely bad timing?)
+# 5 fragments
 #v4=get_video(video_path = "2025_02_19_03_45_00_000_010121.mp4",dt=0.5,calfile="ams21_1.mat",camera_id="0211")
 
 # 3:45:00 - 3:46:00. low elevation
-#v2=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
+# good top fragment!
+v2=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
 
 # 3:46:00 - 3:46:20
 #v7=get_video(video_path = "2025_02_19_03_46_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
@@ -549,14 +545,17 @@ def triangulate_dual(v1,v2):
 # 3:46:37 - 3:47:00
 #v10=get_video(video_path = "2025_02_19_03_46_01_000_010028.mp4",dt=-0.8,calfile="0228.mat",h=145,camera_id="0228",flip=False)
 
-
-# 3:47:01 - 3:47:30 (until no longer observable)
-v11=get_video(video_path = "2025_02_19_03_47_01_000_010881_ams0882.mp4",calfile="0882.mat",camera_id="0882",flip=False)
-# 3:47:00 - 3:47:30 (until not longer observable)
-v12=get_video(video_path = "2025_02_19_03_47_01_000_010028_ams0228.mp4",dt=-0.8,calfile="0228.mat",camera_id="0228",flip=False)
-
 # 3:46:07 - 3:46:43
 # 2025_02_19_03_46_00_000_010096.mp4
+#v13=get_video(video_path = "2025_02_19_03_46_00_000_010096.mp4",dt=0,calfile="0166.mat",camera_id="0166",flip=False)
+
+
+# 3:47:01 - 3:47:30 (until no longer observable)
+#v11=get_video(video_path = "2025_02_19_03_47_01_000_010881_ams0882.mp4",calfile="0882.mat",camera_id="0882",flip=False)
+# 3:47:00 - 3:47:30 (until not longer observable)
+#v12=get_video(video_path = "2025_02_19_03_47_01_000_010028_ams0228.mp4",dt=-0.8,calfile="0228.mat",camera_id="0228",flip=False)
+
+
 
 # 3:46:10 - 3:46:50
 # 2025_02_19_03_46_00_000_012386.mp4
@@ -567,13 +566,14 @@ v12=get_video(video_path = "2025_02_19_03_47_01_000_010028_ams0228.mp4",dt=-0.8,
 #triangulate_dual(v0,v1)
 #triangulate_dual(v1,v6)
 #triangulate_dual(v6,v3)
+#triangulate_dual(v6,v5)
 #triangulate_dual(v3,v5)
 #triangulate_dual(v4,v5)
-#triangulate_dual(v5,v2)
+triangulate_dual(v5,v2)
 #triangulate_dual(v8,v9)
 #triangulate_dual(v8,v10)
-triangulate_dual(v11,v12)
-
+#triangulate_dual(v11,v12)
+#triangulate_dual(v9,v13)
 #triangulate_dual(v6,v1)
 #triangulate_dual(v3,v5)
 #triangulate_dual(v5,v4)
