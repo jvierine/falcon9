@@ -294,7 +294,7 @@ def fragment_positions():
 
     for f in fl:
         h=h5py.File(f,"r")
-        fid=re.search(r"fragments/(\d+)_.*\.h5",f).group(1)
+        fid=re.search(r"fragments/([a-zA-Z0-9])_.*\.h5",f).group(1)
         pos_est=h["pos_est"][()]
         if fid not in fragment_geo_pos.keys():
             fragment_geo_pos[fid]=[]
@@ -483,7 +483,7 @@ def triangulate_dual(v1,v2):
                         # add to the complicated data structure
                         if tnow_key not in v["fragments"].keys():
                             v["fragments"][tnow_key]={}
-                        fragment_id=int(event.key)
+                        fragment_id=event.key
                         v["fragments"][tnow_key][fragment_id]={"x":x,"y":y,"az":taz,"el":tel,"fragment_id":fragment_id}
 
                         # add record of fragment id
@@ -505,7 +505,7 @@ def triangulate_dual(v1,v2):
         # do the triangulation part
         # triangulate all fragments seen by two cameras
         for fid in fragment_ids.keys():
-            print("key %d"%(fid))
+            print("key %s"%(fid))
             # list of fragments to triangulate
             lats=[]
             longs=[]
@@ -527,11 +527,11 @@ def triangulate_dual(v1,v2):
             # this should always be the case with this script, as we check that both 
             # video 1 and video 2 have this fragment on this timestamp!
             if len(lats) == 2: 
-                print("triangulating fragement id %d"%(fid))
+                print("triangulating fragement id %s"%(fid))
                 pos_est,error_std=triangulate(azs,els,lats,longs)
             else:
-                exit(0)
                 print("exiting. we should have never reached this point. debugging needed")
+#                exit(0)
 
             # save fragment data to hdf5 file with h5py
             # only save if more than two cameras see it
@@ -540,7 +540,7 @@ def triangulate_dual(v1,v2):
                 for cid in cam_ids:
                     id_str=id_str + "_"+ cid
                 # unique identified based on: fragment id, camera id numbers, and timestamp.
-                ofname="fragments/%d%s_%s.h5"%(fid,id_str,tnow_key)
+                ofname="fragments/%s%s_%s.h5"%(fid,id_str,tnow_key)
                 print("saving %s"%(ofname))
                 ho=h5py.File(ofname,"w")
                 ho["pos_est"]=pos_est
@@ -553,7 +553,7 @@ def triangulate_dual(v1,v2):
 v1=get_video2()
 
 # 3:44-3:45 Fragments: 1,2
-v0=get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.mat",camera_id="2165")
+#v0=get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.mat",camera_id="2165")
 
 # 3:45:00 - 3:45:26 
 # flipped cal!
@@ -567,17 +567,24 @@ v0=get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.m
 
 # 3:45:30 - 3:46:00 (calibration might be off near horizon)
 # 5 fragments. ok top
-v5=get_video(video_path="2025_02_19_03_45_00_000_010761.mp4",calfile="ams_761.mat",camera_id="0761")
+#v5=get_video(video_path="2025_02_19_03_45_00_000_010761.mp4",calfile="ams_761.mat",camera_id="0761")
+
+v760=get_video(video_path="2025_02_19_03_44_00_000_010760.mp4",calfile="ams_761.mat",camera_id="0760")
 
 # 3:45:21-3:45:58 (most likely bad timing?)
 # 5 fragments
-#v4=get_video(video_path = "2025_02_19_03_45_00_000_010121.mp4",dt=0.5,calfile="ams21_1.mat",camera_id="0211")
+#v4=get_video(video_path = "2025_02_19_03_45_00_000_010121.mp4",dt=0.8,calfile="ams21_1.mat",camera_id="0211")
+
+#v522=get_video(video_path = "2025_02_19_03_45_01_000_010314_cam5.mp4",dt=0.0,calfile="AMS52_5.mat",camera_id="525")
+
+#/Users/jvi019/Library/CloudStorage/OneDrive-UiTOffice365/falcon9
 
 # 3:45:00 - 3:46:00. low elevation
 # good top fragment!
-v2=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
+#v2=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
 
 # 3:46:00 - 3:46:20
+# cam5 ams16
 #v7=get_video(video_path = "2025_02_19_03_46_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
 
 # 3:46:00 - 3:47:00
@@ -586,15 +593,16 @@ v2=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",calfile="ams016.m
 
 # 3:46:00 - 3:46:42 (good)
 # 2025_02_19_03_46_01_000_010031_ams0221.mp4
-#v9=get_video(video_path = "2025_02_19_03_46_01_000_010031.mp4",calfile="0221.mat",camera_id="0221",flip=False)
+v9=get_video(video_path = "2025_02_19_03_46_01_000_010031.mp4",calfile="0221.mat",camera_id="0221",flip=False)
 
 
 # 3:46:37 - 3:47:00
-#v10=get_video(video_path = "2025_02_19_03_46_01_000_010028.mp4",dt=-0.8,calfile="0228.mat",h=145,camera_id="0228",flip=False)
+# cam2 of lindenberg (ams22)
+v10=get_video(video_path = "2025_02_19_03_46_01_000_010028.mp4",dt=-0.8,calfile="0228.mat",h=145,camera_id="0228",flip=False)
 
 # 3:46:07 - 3:46:43
 # 2025_02_19_03_46_00_000_010096.mp4
-#v13=get_video(video_path = "2025_02_19_03_46_00_000_010096.mp4",dt=0,calfile="0166.mat",camera_id="0166",flip=False)
+v13=get_video(video_path = "2025_02_19_03_46_00_000_010096.mp4",dt=0,calfile="0166.mat",camera_id="0166",flip=False)
 
 
 # 3:47:01 - 3:47:30 (until no longer observable)
@@ -609,8 +617,10 @@ v2=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",calfile="ams016.m
 
 # 3:46:10 - 3:47:00 (good)
 # 2025_02_19_03_46_01_000_010074_ams0352.mp4
+triangulate_dual(v9,v13)
 
-triangulate_dual(v0,v1)
+#triangulate_dual(v4,v5)
+#triangulate_dual(v4,v522)
 #triangulate_dual(v1,v6)
 #triangulate_dual(v6,v3)
 #triangulate_dual(v6,v5)
