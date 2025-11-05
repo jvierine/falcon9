@@ -139,6 +139,7 @@ def triangulate(azs,els,lats,lons,plot_line_of_sight=False):
     5) compute shortest intersection distances and report max distance as error estimate
     """
     # two camera triangulation
+    # TBD: add height!!!
     r0=jcoord.geodetic2ecef(lats[0],lons[0],0)
     r1=jcoord.geodetic2ecef(lats[1],lons[1],0)
 
@@ -243,6 +244,7 @@ def get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",dt=0,calfile="am
 
 #    el=90-ze
     # az,el -> x,y search tree
+    # this is needed to speed up az,el -> x,y conversion
     kd=create_kdtree(az,el)
 
     long=ams216["long_lat"][0,0]
@@ -292,7 +294,7 @@ def fragment_positions():
 
     for f in fl:
         h=h5py.File(f,"r")
-        fid=re.search(r"fragments/(\d+)_.*\.h5",f).group(1)
+        fid=re.search(r"fragments/([a-zA-Z0-9])_.*\.h5",f).group(1)
         pos_est=h["pos_est"][()]
         if fid not in fragment_geo_pos.keys():
             fragment_geo_pos[fid]=[]
@@ -349,7 +351,9 @@ def plot_star_pos(ax,bs,tnow,v):
     ax.scatter(star_ys,star_xs,s=80, facecolors='none', edgecolors='w',alpha=0.2)
 
 def triangulate_dual(v1,v2):
+    
     videos=[v1,v2]
+
     # for overplotting stars
     bs=bright_stars.bright_stars()
 
@@ -365,31 +369,43 @@ def triangulate_dual(v1,v2):
 
     # go through all frames with dt spacing
     n_frames = int((t1_max-t0_min)/dt)
+
     fragment_ids={}
+    # go through all the frames
     for fi in range(n_frames):
-        # time now in ms since t0_min
+        # time now in ms since t0_min. this is the frame time we are going to try to 
+        # triangulate
         tnow = (t0_min + dt*fi)
-        # key for fragments dict
+
+        # key for fragments dict (use milliseconds to have a unique integer key)
         tnow_key=int(tnow*1000.0)
-        # go through all videos and ask user to mark fragments with keys 1-9
+
+        # go through all videos and ask user to mark fragments with keys 1-9 
         # tbd: figure out how to index more framents if needed...  
         for v in videos:
+            # this is the frame number we need to read from video v
             idx = int((tnow - v["t0"])*v["fps"])
+
             # if not in video range, skip
             if idx < 0 or idx >= v["frame_count"]:
                 continue
+
             # seek frame number idx
             v["cap"].set(cv2.CAP_PROP_POS_FRAMES, idx)
-            # read frame
+
+            # read frame as image array
             ret, frame = v["cap"].read()
-            # if we get a frame
+
+            # if we get a frame succesfully 
             if ret:
                 # Convert from BGR (OpenCV default) to RGB for plotting
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                # plot
+
+                # plot frame
                 fig, ax = plt.subplots(1,1,figsize=(8*1.4,6.4*1.1))
                 ax.imshow(frame_rgb)
                 print("frame %d"%(idx))
+                # instructions for usage
                 ax.set_title(f"zoom and position cursor, then press fragment id number (1-9) ")#%(lat,long))
                 
                 # plot stars. useful for checking that star calibration is correct
@@ -397,11 +413,14 @@ def triangulate_dual(v1,v2):
                 if plot_stars:
                     plot_star_pos(ax,bs,tnow,v)
 
-
+                # show positions of all so far triangulated fragments overlayed on the image
+                # to avoid redoing the triangulation and to help identify what fragment is what
                 show_fragments=True
                 if show_fragments:
-                    # reload
+                    # reload all fragments from fragments directory
                     fp,ft=fragment_positions()
+
+                    # go through all fragments
                     for frag in fp.keys():
                         poss=fp[frag]
                         ftimes=ft[frag]
@@ -410,6 +429,7 @@ def triangulate_dual(v1,v2):
                         frag_xs=[]
                         frag_ys=[]
                         for i in range(len(fazs)):
+                            # get pixel position using calibration
                             x,y=interpolate_pixel(fazs[i],fels[i],v["kd"],v["az"],v["el"],k=4,p=2)
                             #if x > 0 and x < v["az"].shape[0] and y > 0 and y < v["az"].shape[1]:
                             frag_xs.append(x)
@@ -418,13 +438,18 @@ def triangulate_dual(v1,v2):
                         frag_ys=n.array(frag_ys)
                         hidx=n.where(ftimes < tnow)[0]
                         fidx=n.where(ftimes >= tnow)[0]
-
+                        # overplot fragments positions on image
+                        # red means fragments with timestamp earlier than now
                         ax.plot(frag_ys[hidx],frag_xs[hidx],".",color="red",alpha=0.5)
+                        # green means fragments with timestamp later than or equal to now
                         if len(hidx)>0:
                             last_i=n.argmax(ftimes[hidx])
                             ax.text(frag_ys[hidx[last_i]],frag_xs[hidx[last_i]],"%s"%(frag),color="red")
                         ax.plot(frag_ys[fidx],frag_xs[fidx],".",color="green",alpha=0.5)
                         
+                # if we are on the second video, and we have 
+                # annotated fragments, draw a line from station 1 into space overlayed on camera 2
+                # this line should intersect with fragment on video 2. 
                 show_line_of_sight=True
                 if show_line_of_sight:
                     if v == v2:
@@ -440,71 +465,93 @@ def triangulate_dual(v1,v2):
                                 ax.plot(ly,lx,color="white",alpha=0.1)
                             else:
                                 print("key",fid,"not in fragments")
-
+                # capture keyboard input
                 def onkey(event):
+                    # close frame
                     if event.key == "q":
                         return 
+                    
+                    # do nothing if we haven't pressed key with cursor over image
                     if event.inaxes != ax:
                         return
+
+                    # store image pixel for fragment
                     if event.inaxes == ax:
                         # read cam 1 position
                         x, y = int(event.xdata), int(event.ydata)
                         taz,tel=xy_to_azel(v["az"],v["el"],y,x)
+                        # add to the complicated data structure
                         if tnow_key not in v["fragments"].keys():
                             v["fragments"][tnow_key]={}
-                        v["fragments"][tnow_key][int(event.key)]={"x":x,"y":y,"az":taz,"el":tel,"fragment_id":int(event.key)}
+                        fragment_id=event.key
+                        v["fragments"][tnow_key][fragment_id]={"x":x,"y":y,"az":taz,"el":tel,"fragment_id":fragment_id}
+
                         # add record of fragment id
-                        if int(event.key) not in fragment_ids.keys():
-                            fragment_ids[int(event.key)]=1
+                        if fragment_id not in fragment_ids.keys():
+                            fragment_ids[fragment_id]=1
                         else:
-                            fragment_ids[int(event.key)]+=1
+                            fragment_ids[fragment_id]+=1
 
-                        print(v["fragments"][tnow_key][int(event.key)])##={"x":x,"y":y,"az":taz,"el":tel,"fragment_id":int(event.key)}
-
-                        ax.plot(x, y, "x", color="red",alpha=0.5)#
+                        print(v["fragments"][tnow_key][fragment_id])
+                        # plot the newly annotated fragment
+                        ax.plot(x, y, "x", color="red",alpha=0.5)
+                        # text indicating fragment id
                         ax.text(x,y,event.key,color="red",alpha=0.5)
                         
                         fig.canvas.draw()
             fig.canvas.mpl_connect("key_press_event", onkey)
             plt.show()
         
-        if True:
-            # triangulate all fragments seen by two cameras
-            for fid in fragment_ids.keys():
-                print("key %d"%(fid))
-                lats=[]
-                longs=[]
-                azs=[]
-                els=[]
-                cam_ids=[]
-                for v in videos:
-                    if (tnow_key in v["fragments"].keys()) and (fid in v["fragments"][tnow_key].keys()):
-                        cam_ids.append(v["camera_id"])
-                        lats.append(v["lat"])
-                        longs.append(v["long"])
-                        azs.append(v["fragments"][tnow_key][fid]["az"])
-                        els.append(v["fragments"][tnow_key][fid]["el"])    
-                if len(lats) == 2: # tbd: support more than two cameras in triangulate()
-                    print("triangulating fragement id %d"%(fid))
-                    pos_est,error_std=triangulate(azs,els,lats,longs)
+        # do the triangulation part
+        # triangulate all fragments seen by two cameras
+        for fid in fragment_ids.keys():
+            print("key %s"%(fid))
+            # list of fragments to triangulate
+            lats=[]
+            longs=[]
+            azs=[]
+            els=[]
+            cam_ids=[]
+            # go through both videos
+            for v in videos:
+                # does this fragment id contain this frame (tnow_key)
+                # if yes, then add to list of fragments to triangulate
+                if (tnow_key in v["fragments"].keys()) and (fid in v["fragments"][tnow_key].keys()):
+                    cam_ids.append(v["camera_id"])
+                    lats.append(v["lat"])
+                    longs.append(v["long"])
+                    # TBD: add camera height!!!
+                    azs.append(v["fragments"][tnow_key][fid]["az"])
+                    els.append(v["fragments"][tnow_key][fid]["el"])    
+            # if we have exactly two cameras with this fragment position, then triangulate
+            # this should always be the case with this script, as we check that both 
+            # video 1 and video 2 have this fragment on this timestamp!
+            if len(lats) == 2: 
+                print("triangulating fragement id %s"%(fid))
+                pos_est,error_std=triangulate(azs,els,lats,longs)
+            else:
+                print("exiting. we should have never reached this point. debugging needed")
+#                exit(0)
 
-                # save fragment data to hdf5 file with h5py
-                # only save if more than two cameras see it
-                id_str=""
-                if len(cam_ids) > 1:
-                    for cid in cam_ids:
-                        id_str=id_str + "_"+ cid
-                    ofname="fragments/%d%s_%s.h5"%(fid,id_str,tnow_key)
-                    print("saving %s"%(ofname))
-                    ho=h5py.File(ofname,"w")
-                    ho["pos_est"]=pos_est
-                    ho["pos_err"]=error_std
-                    ho["time"]=tnow
-                    ho.close()
+            # save fragment data to hdf5 file with h5py
+            # only save if more than two cameras see it
+            id_str=""
+            if len(cam_ids) > 1:
+                for cid in cam_ids:
+                    id_str=id_str + "_"+ cid
+                # unique identified based on: fragment id, camera id numbers, and timestamp.
+                ofname="fragments/%s%s_%s.h5"%(fid,id_str,tnow_key)
+                print("saving %s"%(ofname))
+                ho=h5py.File(ofname,"w")
+                ho["pos_est"]=pos_est
+                ho["pos_err"]=error_std
+                ho["time"]=tnow
+                ho.close()
 
 
 # 3:44-3:45:23. Fragments: 1,2
-#v1=get_video2()
+v1=get_video2()
+
 # 3:44-3:45 Fragments: 1,2
 #v0=get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.mat",camera_id="2165")
 
@@ -520,17 +567,24 @@ def triangulate_dual(v1,v2):
 
 # 3:45:30 - 3:46:00 (calibration might be off near horizon)
 # 5 fragments. ok top
-v5=get_video(video_path="2025_02_19_03_45_00_000_010761.mp4",calfile="ams_761.mat",camera_id="0761")
+#v5=get_video(video_path="2025_02_19_03_45_00_000_010761.mp4",calfile="ams_761.mat",camera_id="0761")
+
+v760=get_video(video_path="2025_02_19_03_44_00_000_010760.mp4",calfile="ams_761.mat",camera_id="0760")
 
 # 3:45:21-3:45:58 (most likely bad timing?)
 # 5 fragments
-#v4=get_video(video_path = "2025_02_19_03_45_00_000_010121.mp4",dt=0.5,calfile="ams21_1.mat",camera_id="0211")
+#v4=get_video(video_path = "2025_02_19_03_45_00_000_010121.mp4",dt=0.8,calfile="ams21_1.mat",camera_id="0211")
+
+#v522=get_video(video_path = "2025_02_19_03_45_01_000_010314_cam5.mp4",dt=0.0,calfile="AMS52_5.mat",camera_id="525")
+
+#/Users/jvi019/Library/CloudStorage/OneDrive-UiTOffice365/falcon9
 
 # 3:45:00 - 3:46:00. low elevation
 # good top fragment!
-v2=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
+#v2=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
 
 # 3:46:00 - 3:46:20
+# cam5 ams16
 #v7=get_video(video_path = "2025_02_19_03_46_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
 
 # 3:46:00 - 3:47:00
@@ -539,15 +593,16 @@ v2=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",calfile="ams016.m
 
 # 3:46:00 - 3:46:42 (good)
 # 2025_02_19_03_46_01_000_010031_ams0221.mp4
-#v9=get_video(video_path = "2025_02_19_03_46_01_000_010031.mp4",calfile="0221.mat",camera_id="0221",flip=False)
+v9=get_video(video_path = "2025_02_19_03_46_01_000_010031.mp4",calfile="0221.mat",camera_id="0221",flip=False)
 
 
 # 3:46:37 - 3:47:00
-#v10=get_video(video_path = "2025_02_19_03_46_01_000_010028.mp4",dt=-0.8,calfile="0228.mat",h=145,camera_id="0228",flip=False)
+# cam2 of lindenberg (ams22)
+v10=get_video(video_path = "2025_02_19_03_46_01_000_010028.mp4",dt=-0.8,calfile="0228.mat",h=145,camera_id="0228",flip=False)
 
 # 3:46:07 - 3:46:43
 # 2025_02_19_03_46_00_000_010096.mp4
-#v13=get_video(video_path = "2025_02_19_03_46_00_000_010096.mp4",dt=0,calfile="0166.mat",camera_id="0166",flip=False)
+v13=get_video(video_path = "2025_02_19_03_46_00_000_010096.mp4",dt=0,calfile="0166.mat",camera_id="0166",flip=False)
 
 
 # 3:47:01 - 3:47:30 (until no longer observable)
@@ -562,14 +617,16 @@ v2=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",calfile="ams016.m
 
 # 3:46:10 - 3:47:00 (good)
 # 2025_02_19_03_46_01_000_010074_ams0352.mp4
+triangulate_dual(v9,v13)
 
-#triangulate_dual(v0,v1)
+#triangulate_dual(v4,v5)
+#triangulate_dual(v4,v522)
 #triangulate_dual(v1,v6)
 #triangulate_dual(v6,v3)
 #triangulate_dual(v6,v5)
 #triangulate_dual(v3,v5)
 #triangulate_dual(v4,v5)
-triangulate_dual(v5,v2)
+#triangulate_dual(v5,v2)
 #triangulate_dual(v8,v9)
 #triangulate_dual(v8,v10)
 #triangulate_dual(v11,v12)
