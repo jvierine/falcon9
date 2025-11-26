@@ -10,9 +10,9 @@ fl.sort()
 fragment_ids=[]
 
 for f in fl:
-    m=re.match(r"fragments/(\d+)_.*\.h5",f)
+    m=re.match(r"fragments/(.*)_.*\.h5",f)
     if m:
-        fid=int(m.group(1))
+        fid=str(m.group(1))
         if fid not in fragment_ids:
             fragment_ids.append(fid)
 
@@ -29,7 +29,7 @@ for fid in fragment_ids:
     pos_err=[]
 
     times=[]
-    fl=glob.glob("fragments/%d_*.h5"%(fid))
+    fl=glob.glob("fragments/%s_*.h5"%(fid))
     fl.sort()
     for f in fl:
         print(f)
@@ -49,6 +49,24 @@ for fid in fragment_ids:
 
     fragment_times.append(n.array(times))#,"s"))
 #fig,(ax1,ax2)=plt.subplots(2,1)
+
+# go through all fragment id
+hgt_count=n.zeros(120)
+hgt_count_all=n.zeros(120)
+
+for fp in range(len(fragment_pos)):
+    geo=fragment_geo_pos[fp]
+    hgt_count[:]=0
+    hgt_count[n.array(n.round(geo[:,2]/1e3),dtype=int)]=1
+    hgt_count_all+=hgt_count
+
+
+plt.plot(hgt_count_all,n.arange(120),"s")
+plt.xlabel("Number of fragments")
+plt.ylabel("Height (km)")
+plt.show()
+
+
 plt.subplot(111)
 for fp in range(len(fragment_pos)):
     # convert times to datetime64
@@ -59,13 +77,13 @@ for fp in range(len(fragment_pos)):
         yerr=2*fragment_pos_err[fp]/1e3,
         fmt='o',          # circle markers
         linestyle='none', # no line connecting them
-        label="%d" % (fragment_ids[fp])
+        label="%s" % (fragment_ids[fp])
     )
 #    plt.errorbar(datetime,fragment_geo_pos[fp][:,2]/1e3,yerr=2*fragment_pos_err[fp]/1e3,label="%d"%(fragment_ids[fp]))
 plt.xlabel("unix time (s)")
 plt.ylabel("height (m)")
 plt.title("Fragment heights over time")
-plt.legend()
+#plt.legend()
 plt.show()
 # plot lat vs long with cartopy on map of europe
 import cartopy.crs as ccrs
