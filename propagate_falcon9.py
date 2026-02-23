@@ -13,75 +13,8 @@ from skyfield.api import wgs84
 import plot_fragments
 import jcoord
 
-hgt_count,hgt_count_all,fragment_ids,fragment_pos,fragment_pos_err,fragment_geo_pos,fragment_times=plot_fragments.get_fragments()
 
-def itrs2latlonh(x,y,z):
-    llh=jcoord.ecef2geodetic(x,y,z)
-    return(llh[0],llh[1],llh[2])
-
-radius_earth_km=6378.135
-f=open("data/tles.txt","r")
-a=[]
-jds=[]
-l1s=[]
-l2s=[]
-
-# Read all TLEs that are obtained from space-track.org
-while True:
-    l1=f.readline()
-    if l1 == "":
-        break
-    l2=f.readline()
-    l1s.append(l1)
-    l2s.append(l2)
-    
-    satellite = Satrec.twoline2rv(l1, l2)
-    a_km = radius_earth_km*satellite.a
-    a.append(a_km)
-    
-    year = satellite.epochyr
-    day_of_year = satellite.epochdays
-    
-    # these are all the TLE epochs
-    jd=satellite.jdsatepoch+satellite.jdsatepochF
-    jds.append(jd)
-
-# 1st of jan, 1970 in JD
-JD_UNIX_EPOCH = 2440587.5
-jds=np.array(jds)
-seconds_since_epoch = (jds - JD_UNIX_EPOCH) * 86400
-datetime_unix = seconds_since_epoch.astype('timedelta64[s]') + np.datetime64('1970-01-01T00:00:00')
-a=np.array(a)
-da=np.diff(a)/np.diff(jds)
-
-if False:
-    plt.plot(datetime_unix,a-radius_earth_km,".")
-    plt.ylabel("Semi-major axis - Earth radius (km)")
-    plt.xlabel("Time (UTC)")
-    plt.title("Falcon 9 upper stage\n(NORAD ID:62878)")
-    plt.show()
-
-
-ts = load.timescale()
-# last known position
-tle_num=-3
-s = EarthSatellite(l1s[tle_num], l2s[tle_num], "F9", ts)
-t=ts.tt_jd(jds[tle_num])
-geocentric=s.at(t)
-# ECEF position and velocity
-# used as initial condition for numerical propagation
-
-subpoints=geocentric.subpoint()
-lats=subpoints.latitude.degrees
-longs=subpoints.longitude.degrees
-hgt=subpoints.elevation.km*1e3
-plt.plot([longs],[lats],"x")
-
-posvel=geocentric.frame_xyz_and_velocity(itrs)
-pos0=posvel[0].km
-vel0=posvel[1].km_per_s
-
-def propagate(pos0,vel0,tmax=3*3600,dt=10,A_to_m=2e-3):
+def propagate(pos0,vel0,tmax=3*3600,dt=10,A_to_m=1e-3):
 
     pos=[]
     ts=[]
@@ -119,7 +52,8 @@ def propagate(pos0,vel0,tmax=3*3600,dt=10,A_to_m=2e-3):
         v_unit = vel_now/n.linalg.norm(vel_now)
 
         print("atmospheric density %1.2g kg/m^3 hgt %1.2f km vel %1.2f km/s"%(rho_a,hgt/1e3,n.sqrt(v2)/1e3))
-
+        # add gravitational field perturbations!
+        
         # add forces together
         dv_dt = -gamma*A_to_m*rho_a*v2*v_unit + g
         # update velocity
@@ -141,11 +75,83 @@ def propagate(pos0,vel0,tmax=3*3600,dt=10,A_to_m=2e-3):
     return(pos,vels,hgts,lats,lons)
         
         
-        
-        
-pos,vels,hgts,lats,lons=propagate(pos0,vel0,tmax=3600,dt=10,A_to_m=1e-3)
-plt.plot(lons,lats,".")
 
-for fp in range(len(fragment_pos)):
-    plt.plot(fragment_geo_pos[fp][:,1],fragment_geo_pos[fp][:,0])
-plt.show()
+def compare_fragments_with_propagation():
+    hgt_count,hgt_count_all,fragment_ids,fragment_pos,fragment_pos_err,fragment_geo_pos,fragment_times=plot_fragments.get_fragments()
+
+    def itrs2latlonh(x,y,z):
+        llh=jcoord.ecef2geodetic(x,y,z)
+        return(llh[0],llh[1],llh[2])
+
+    radius_earth_km=6378.135
+    f=open("data/tles.txt","r")
+    a=[]
+    jds=[]
+    l1s=[]
+    l2s=[]
+
+    # Read all TLEs that are obtained from space-track.org
+    while True:
+        l1=f.readline()
+        if l1 == "":
+            break
+        l2=f.readline()
+        l1s.append(l1)
+        l2s.append(l2)
+
+        satellite = Satrec.twoline2rv(l1, l2)
+        a_km = radius_earth_km*satellite.a
+        a.append(a_km)
+
+        year = satellite.epochyr
+        day_of_year = satellite.epochdays
+
+        # these are all the TLE epochs
+        jd=satellite.jdsatepoch+satellite.jdsatepochF
+        jds.append(jd)
+
+    # 1st of jan, 1970 in JD
+    JD_UNIX_EPOCH = 2440587.5
+    jds=np.array(jds)
+    seconds_since_epoch = (jds - JD_UNIX_EPOCH) * 86400
+    datetime_unix = seconds_since_epoch.astype('timedelta64[s]') + np.datetime64('1970-01-01T00:00:00')
+    a=np.array(a)
+    da=np.diff(a)/np.diff(jds)
+
+    if False:
+        plt.plot(datetime_unix,a-radius_earth_km,".")
+        plt.ylabel("Semi-major axis - Earth radius (km)")
+        plt.xlabel("Time (UTC)")
+        plt.title("Falcon 9 upper stage\n(NORAD ID:62878)")
+        plt.show()
+
+
+    ts = load.timescale()
+    # last known position
+    tle_num=-4
+    s = EarthSatellite(l1s[tle_num], l2s[tle_num], "F9", ts)
+    t=ts.tt_jd(jds[tle_num])
+    geocentric=s.at(t)
+    # ECEF position and velocity
+    # used as initial condition for numerical propagation
+
+    subpoints=geocentric.subpoint()
+    lats=subpoints.latitude.degrees
+    longs=subpoints.longitude.degrees
+    hgt=subpoints.elevation.km*1e3
+    plt.plot([longs],[lats],"x")
+
+    posvel=geocentric.frame_xyz_and_velocity(itrs)
+    pos0=posvel[0].km
+    vel0=posvel[1].km_per_s
+
+
+    pos,vels,hgts,lats,lons=propagate(pos0,vel0,tmax=3600,dt=10,A_to_m=1e-3)
+    plt.plot(lons,lats,".")
+
+    for fp in range(len(fragment_pos)):
+        plt.plot(fragment_geo_pos[fp][:,1],fragment_geo_pos[fp][:,0])
+    plt.show()
+
+
+compare_fragments_with_propagation()
