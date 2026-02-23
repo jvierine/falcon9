@@ -97,7 +97,7 @@ ax.add_feature(cfeature.BORDERS, linestyle=':')
 ax.add_feature(cfeature.LAKES, alpha=0.5)
 ax.add_feature(cfeature.RIVERS)
 for fp in range(len(fragment_pos)):
-    plt.plot(fragment_geo_pos[fp][:,1],fragment_geo_pos[fp][:,0],".",label="%d"%(fragment_ids[fp]))
+    plt.plot(fragment_geo_pos[fp][:,1],fragment_geo_pos[fp][:,0],".",label="%s"%(fragment_ids[fp]))
 plt.xlabel("Longitude")
 plt.ylabel("Latitude")
 plt.title("Fragment ground tracks")
