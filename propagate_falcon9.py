@@ -13,6 +13,11 @@ from skyfield.api import wgs84
 import plot_fragments
 import jcoord
 
+radius_earth_km=6378.135
+
+def itrs2latlonh(x,y,z):
+    llh=jcoord.ecef2geodetic(x,y,z)
+    return(llh[0],llh[1],llh[2])
 
 def propagate(pos0,vel0,tmax=3*3600,dt=10,A_to_m=1e-3):
 
@@ -22,19 +27,21 @@ def propagate(pos0,vel0,tmax=3*3600,dt=10,A_to_m=1e-3):
     hgts=[]
     lats=[]
     lons=[]
-    
+
     n_t = int(tmax/dt)
     pos_now=pos0*1e3
     vel_now=vel0*1e3
-    
+    tnow=0.0
     for i in range(n_t):
 
         msis_dates = n.array([n.datetime64("2025-02-19T03:00")])
         radius=n.linalg.norm(pos_now)
-        hgt=radius-radius_earth_km*1e3
+        
+        llh=jcoord.ecef2geodetic(pos_now[0],pos_now[1],pos_now[2])
+        hgt=llh[2]
         if hgt < 0:
             continue
-#        print(hgt)
+        
         # msis assumes utc date, lon (deg), lat (deg), hgt (km above sea level)
         data=msis.run(msis_dates, -5, 40.0, hgt/1e3, geomagnetic_activity=-1)
         print(data.shape)
@@ -47,7 +54,7 @@ def propagate(pos0,vel0,tmax=3*3600,dt=10,A_to_m=1e-3):
         M_earth=5.9722e24
         
         g0=c.G*M_earth/(radius)**2.0
-        print(g0)
+
         g = -g0*pos_now/n.linalg.norm(pos_now)
         v_unit = vel_now/n.linalg.norm(vel_now)
 
@@ -58,7 +65,7 @@ def propagate(pos0,vel0,tmax=3*3600,dt=10,A_to_m=1e-3):
         dv_dt = -gamma*A_to_m*rho_a*v2*v_unit + g
         # update velocity
         dv = dv_dt*dt
-        print(dv)
+
         vel_next = vel_now + dv
         # update position
         pos_next = pos_now + (0.5*(vel_now + vel_next))*dt
@@ -69,89 +76,81 @@ def propagate(pos0,vel0,tmax=3*3600,dt=10,A_to_m=1e-3):
         lat,lon,el=itrs2latlonh(pos_now[0],pos_now[1],pos_now[2])
         lats.append(lat)
         lons.append(lon)
+        tnow+=dt
+        ts.append(tnow)
         vel_now=vel_next
         pos_now=pos_next
     
-    return(pos,vels,hgts,lats,lons)
+    return(pos,vels,hgts,lats,lons,ts)
         
         
 
 def compare_fragments_with_propagation():
     hgt_count,hgt_count_all,fragment_ids,fragment_pos,fragment_pos_err,fragment_geo_pos,fragment_times=plot_fragments.get_fragments()
+    
+    import pandas as pd
+    
+    cols = [
+        "timestamp", "dt_min", "IFA", "F10_7", "FB10_7", "Ap", "IDW",
+        "rho_kg_m3", "Vn_kms", "Ve_kms", "MMWT", "Tloc_K", "Texo_K",
+        "LST_h", "GLat_deg", "GLon_deg", "GAlt_km", "Va_kms", "gam_deg",
+        "gload", "qdot_W_m2", "SRat", "TRat", "KnInf", "MaInf",
+        "CD", "CD_CD0", "Orb", "ULat_deg", "dS_km",
+        "Hpe_km", "Hap_km", "H_km", "Torb_min", "mjd1950_d"
+    ]
+    
+    # ---- Read the file ----
+    df = pd.read_csv(
+        "data/prediction.dat",
+        comment="#",          # ignore OrbGen header/comments
+        delim_whitespace=True,# split on arbitrary whitespace
+        names=cols,
+        engine="python"
+    )
+    lats=df["GLat_deg"][0:2]
+    lons=df["GLon_deg"][0:2]
+    alts=df["GAlt_km"][0:2]
+    print(lats)
+    print(lons)
+    print(alts)
+    x,y,z=jcoord.geodetic2ecef(lats,lons,alts*1e3)
 
-    def itrs2latlonh(x,y,z):
-        llh=jcoord.ecef2geodetic(x,y,z)
-        return(llh[0],llh[1],llh[2])
+    vel0=n.array([x[1]-x[0],y[1]-y[0],z[1]-z[0]])/60.0
+    pos0=n.array([x[0],y[0],z[0]])
+    llh=jcoord.ecef2geodetic(x[0],y[0],z[0])
+    print(llh)
+#    exit(0)
+#    print(df)
+    
 
-    radius_earth_km=6378.135
-    f=open("data/tles.txt","r")
-    a=[]
-    jds=[]
-    l1s=[]
-    l2s=[]
-
-    # Read all TLEs that are obtained from space-track.org
-    while True:
-        l1=f.readline()
-        if l1 == "":
-            break
-        l2=f.readline()
-        l1s.append(l1)
-        l2s.append(l2)
-
-        satellite = Satrec.twoline2rv(l1, l2)
-        a_km = radius_earth_km*satellite.a
-        a.append(a_km)
-
-        year = satellite.epochyr
-        day_of_year = satellite.epochdays
-
-        # these are all the TLE epochs
-        jd=satellite.jdsatepoch+satellite.jdsatepochF
-        jds.append(jd)
-
-    # 1st of jan, 1970 in JD
-    JD_UNIX_EPOCH = 2440587.5
-    jds=np.array(jds)
-    seconds_since_epoch = (jds - JD_UNIX_EPOCH) * 86400
-    datetime_unix = seconds_since_epoch.astype('timedelta64[s]') + np.datetime64('1970-01-01T00:00:00')
-    a=np.array(a)
-    da=np.diff(a)/np.diff(jds)
-
-    if False:
-        plt.plot(datetime_unix,a-radius_earth_km,".")
-        plt.ylabel("Semi-major axis - Earth radius (km)")
-        plt.xlabel("Time (UTC)")
-        plt.title("Falcon 9 upper stage\n(NORAD ID:62878)")
-        plt.show()
+ #   pos0=posvel[0].km
+ #   vel0=posvel[1].km_per_s
 
 
-    ts = load.timescale()
-    # last known position
-    tle_num=-4
-    s = EarthSatellite(l1s[tle_num], l2s[tle_num], "F9", ts)
-    t=ts.tt_jd(jds[tle_num])
-    geocentric=s.at(t)
-    # ECEF position and velocity
-    # used as initial condition for numerical propagation
-
-    subpoints=geocentric.subpoint()
-    lats=subpoints.latitude.degrees
-    longs=subpoints.longitude.degrees
-    hgt=subpoints.elevation.km*1e3
-    plt.plot([longs],[lats],"x")
-
-    posvel=geocentric.frame_xyz_and_velocity(itrs)
-    pos0=posvel[0].km
-    vel0=posvel[1].km_per_s
-
-
-    pos,vels,hgts,lats,lons=propagate(pos0,vel0,tmax=3600,dt=10,A_to_m=1e-3)
+    pos,vels,hgts,lats,lons,ts=propagate(pos0/1e3,vel0/1e3,tmax=3600,dt=1,A_to_m=1e-3)
     plt.plot(lons,lats,".")
 
     for fp in range(len(fragment_pos)):
         plt.plot(fragment_geo_pos[fp][:,1],fragment_geo_pos[fp][:,0])
+
+    plt.plot(df["GLon_deg"][:],df["GLat_deg"][:],".")
     plt.show()
+
+    for fp in range(len(fragment_pos)):
+        if fp==0:
+            plt.plot(fragment_geo_pos[fp][:,1],fragment_geo_pos[fp][:,2]/1e3,".",label="Observation")
+        plt.plot(fragment_geo_pos[fp][:,1],fragment_geo_pos[fp][:,2]/1e3,".")
+            
+    plt.plot(df["GLon_deg"][:],df["GAlt_km"][:],label="ESA prediction")
+    plt.xlabel("Longitude (deg)")
+    plt.ylabel("Height (km)")
+    plt.legend()
+    plt.show()
+    
+    
+
+#    plt.plot(ts,hgts,".")
+ #   plt.show()
 
 
 compare_fragments_with_propagation()
