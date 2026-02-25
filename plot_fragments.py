@@ -6,19 +6,20 @@ import jcoord
 import matplotlib.pyplot as plt
 
 def get_fragments():
-    fl=glob.glob("fragments/*.h5")
+    fl=glob.glob("fragments/*AMS*.h5")
     fl.sort()
 
     fragment_ids=[]
-
+ #   fragment_files=[]
     for f in fl:
-        m=re.match(r"fragments/(.*)_.*\.h5",f)
+        m=re.match(r"fragments/(.*)_AMS.*_AMS.*\.h5",f)
         if m:
             fid=str(m.group(1))
             if fid not in fragment_ids:
                 fragment_ids.append(fid)
 
 #    print(fragment_ids)
+#    exit(0)
 
     fragment_pos=[]
     fragment_pos_err=[]
@@ -48,7 +49,7 @@ def get_fragments():
         fragment_pos.append(n.array(pos))
         fragment_geo_pos.append(n.array(geo_pos))
         fragment_pos_err.append(n.array(pos_err))
-
+#        fragment_files.append(f)
         fragment_times.append(n.array(times))#,"s"))
     #fig,(ax1,ax2)=plt.subplots(2,1)
 
@@ -109,4 +110,3 @@ if __name__ == "__main__":
     # add gridlines
     gl = ax.gridlines(draw_labels=True)
     plt.show()
-
