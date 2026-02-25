@@ -286,7 +286,7 @@ def fit_observed_trajectory(max_duration=60):
 
                 plt.plot(t_this,pos0[2]+vel0[2]*(t_this-t_this[0]))
                 plt.show()
-            dm_pos0,dm_vel0,dm_A_to_m=fit_drag_model(t_this,x_this,y_this,z_this,pos0,vel0,fname="plots/%s_fit.png"%(fragment_ids[i]))
+            dm_pos0,dm_vel0,dm_A_to_m=fit_drag_model(t_this,x_this,y_this,z_this,pos0,vel0,fname="plots/%s_%1.2f_fit.png"%(fragment_ids[i],t0))
             print("best fit ",fragment_ids[i],t0,dm_pos0,dm_vel0,dm_A_to_m)
             ho=h5py.File("fits/%s_%1.2f.h5"%(fragment_ids[i],t0),"w")
             ho["t0"]=t0
