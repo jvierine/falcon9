@@ -96,23 +96,11 @@ def get_radar_detections():
         h.close()
     return(lats,lons,alts,snrs,times)
 
-def plot_fits():
-    fl=glob.glob("fits/*.h5")
-    for f in fl:
-        h=h5py.File(f,"r")
-        p0=h["p0"][()]
-        llh0=jcoord.ecef2geodetic(p0)
-        t0=h["t0"][()]
-        plt.plot(t0,llh0[2]/1e3,".")
-        h.close()
-    plt.show()
 
 if __name__ == "__main__":
-    plot_fits()
-    exit(0)
     hgt_count,hgt_count_all,fragment_ids,fragment_pos,fragment_pos_err,fragment_geo_pos,fragment_times=get_fragments()
     rlat,rlon,ralt,rsnr,rtime=get_radar_detections()
-    rthresh=10
+    rthresh=20
 
 
 
@@ -137,9 +125,8 @@ if __name__ == "__main__":
 
     for i in range(len(fragment_times)):
         ax.plot(unix_to_datetime(fragment_times[i]),
-                fragment_geo_pos[i][:, 0],
-                ".", color="C0")
-
+                fragment_geo_pos[i][:, 0], ".",color="C0")#, label="%s"%(fragment_ids[i]))
+#    ax.legend()
     ax.set_ylabel("Latitude (deg)")
     ax.set_title("(a)")
     ax.xaxis.set_major_locator(locator)
