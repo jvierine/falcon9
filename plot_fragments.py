@@ -251,10 +251,10 @@ if __name__ == "__main__":
 
     for fp in range(len(fragment_pos)):
         if fp==0:
-            plt.plot(fragment_geo_pos[fp][:,1],fragment_geo_pos[fp][:,0],".",label="fragment")
+            plt.plot(fragment_geo_pos[fp][:,1],fragment_geo_pos[fp][:,0],".",label="fragment %s"%(fragment_ids[fp]))
         else:
             plt.plot(fragment_geo_pos[fp][:,1],fragment_geo_pos[fp][:,0],".")
-        
+    plt.legend()
 
     plt.xlabel("Longitude")
     plt.ylabel("Latitude")
