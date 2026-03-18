@@ -39,7 +39,7 @@ def propagate(pos0,
     hgts=[]
     lats=[]
     lons=[]
-
+    rhos=[]
     n_t = int(tmax/dt)
     pos_now=pos0
     vel_now=vel0
@@ -86,9 +86,9 @@ def propagate(pos0,
         vel_next = vel_now + dv
         # update position
         pos_next = pos_now + (0.5*(vel_now + vel_next))*dt
-
+        rhos.append(rho_a)
         pos.append(pos_now)
-        vels.append(vel_now)
+        vels.append(n.linalg.norm(vel_now))
         hgts.append(hgt)
         lat,lon,el=itrs2latlonh(pos_now[0],pos_now[1],pos_now[2])
         lats.append(lat)
@@ -98,7 +98,7 @@ def propagate(pos0,
         vel_now=vel_next
         pos_now=pos_next
     
-    return(pos,vels,hgts,lats,lons,ts)
+    return(pos,vels,hgts,lats,lons,ts,rhos)
         
         
 
@@ -144,7 +144,7 @@ def compare_fragments_with_propagation():
  #   vel0=posvel[1].km_per_s
 
 
-    pos,vels,hgts,lats,lons,ts=propagate(pos0/1e3,vel0/1e3,tmax=3600,dt=1,A_to_m=1e-3)
+    pos,vels,hgts,lats,lons,ts,rhos=propagate(pos0/1e3,vel0/1e3,tmax=3600,dt=1,A_to_m=1e-3)
     plt.plot(lons,lats,".")
 
     for fp in range(len(fragment_pos)):
@@ -182,11 +182,11 @@ def forward_model(x,t_max):
   #  print("p0",p0)
  #   print("v0",v0)
 #    print("atm",AtM)
-    m_pos,m_vels,m_hgts,m_lats,m_lons,m_ts=propagate(p0,v0,
-                                                     tmax=t_max,
-                                                     dt=0.2,
-                                                     A_to_m=AtM,
-                                                     msis_date0=n.datetime64("2025-02-19T03:30"))
+    m_pos,m_vels,m_hgts,m_lats,m_lons,m_ts,m_rhos=propagate(p0,v0,
+                                                            tmax=t_max,
+                                                            dt=0.2,
+                                                            A_to_m=AtM,
+                                                            msis_date0=n.datetime64("2025-02-19T03:30"))
     m_pos=n.array(m_pos)
     m_ts=n.array(m_ts)
     
@@ -194,14 +194,17 @@ def forward_model(x,t_max):
     fx=sint.interp1d(m_ts,m_pos[:,0])
     fy=sint.interp1d(m_ts,m_pos[:,1])
     fz=sint.interp1d(m_ts,m_pos[:,2])
-    return(fx,fy,fz)
+    frho=sint.interp1d(m_ts,m_rhos)
+    fvel=sint.interp1d(m_ts,m_vels)
+
+    return(fx,fy,fz,frho,fvel)
 
 #dm_pos0,dm_vel0,dm_A_to_m=fit_drag_model(t_this,x_this,y_this,z_this,pos0,vel0)
 def fit_drag_model(t_this,x_this,y_this,z_this,pos0,vel0,fname="fit.png"):
     t_max=(n.max(t_this)-n.min(t_this))+1.0
     t0=n.min(t_this)
     def ss(x):
-        fx,fy,fz=forward_model(x,t_max)
+        fx,fy,fz,frho,fvel=forward_model(x,t_max)
         model_x=fx(t_this-t0)
         model_y=fy(t_this-t0)
         model_z=fz(t_this-t0)
@@ -216,7 +219,7 @@ def fit_drag_model(t_this,x_this,y_this,z_this,pos0,vel0,fname="fit.png"):
     
     xhat=so.fmin(ss,x_guess)
 
-    fx,fy,fz=forward_model(xhat,t_max)
+    fx,fy,fz,frho,fvel=forward_model(xhat,t_max)
     tmodel=n.linspace(0,t_max-1,num=100)
 
     if True:
@@ -234,7 +237,7 @@ def fit_drag_model(t_this,x_this,y_this,z_this,pos0,vel0,fname="fit.png"):
         plt.plot(t_this-t0,z_this,"x")
         plt.savefig(fname)
         plt.close()
-    return(xhat[0:3],xhat[3:6],xhat[6])
+    return(xhat[0:3],xhat[3:6],xhat[6],fx(t_this-t0),fy(t_this-t0),fz(t_this-t0),frho(t_this-t0),fvel(t_this-t0))
 
         
 
@@ -286,7 +289,7 @@ def fit_observed_trajectory(max_duration=60):
 
                 plt.plot(t_this,pos0[2]+vel0[2]*(t_this-t_this[0]))
                 plt.show()
-            dm_pos0,dm_vel0,dm_A_to_m=fit_drag_model(t_this,x_this,y_this,z_this,pos0,vel0,fname="plots/%s_%1.2f_fit.png"%(fragment_ids[i],t0))
+            dm_pos0,dm_vel0,dm_A_to_m,fitx,fity,fitz,fitrho,fitvel=fit_drag_model(t_this,x_this,y_this,z_this,pos0,vel0,fname="plots/%s_%1.2f_fit.png"%(fragment_ids[i],t0))
             print("best fit ",fragment_ids[i],t0,dm_pos0,dm_vel0,dm_A_to_m)
             ho=h5py.File("fits/%s_%1.2f.h5"%(fragment_ids[i],t0),"w")
             ho["t0"]=t0
@@ -295,6 +298,12 @@ def fit_observed_trajectory(max_duration=60):
             ho["x_this"]=x_this
             ho["y_this"]=y_this
             ho["z_this"]=z_this
+            ho["fitx"]=fitx
+            ho["fity"]=fity
+            ho["fitz"]=fitz
+            ho["fitrho"]=fitrho
+            ho["fitvel"]=fitvel
+
             ho["drag_fit_p0"]=dm_pos0
             ho["drag_fit_v0"]=dm_vel0
             ho["drag_fit_A_to_m"]=dm_A_to_m
