@@ -169,6 +169,86 @@ def get_msis_density(times_unix, lat_deg, lon_deg, alt_m):
 
     return rho_a
 
+
+def _extract_msis_total_density(data):
+    arr = n.asarray(data)
+    arr = n.squeeze(arr)
+    if arr.ndim == 0:
+        return n.asarray([float(arr)], dtype=float)
+    if arr.ndim == 1:
+        return n.asarray([float(arr[0])], dtype=float)
+    return n.asarray(arr[..., 0], dtype=float)
+
+
+def circular_mean_deg(angle_deg):
+    angle_rad = n.deg2rad(n.asarray(angle_deg, dtype=float))
+    return float(n.rad2deg(n.angle(n.mean(n.exp(1j * angle_rad)))))
+
+
+def build_msis_density_profile(times_unix, pos_ecef, n_altitude=512, min_top_alt_m=300e3, alt_pad_m=50e3):
+    """
+    Build a 1D density profile rho(h) using a single MSIS call at the mean
+    measurement time and mean geodetic latitude/longitude.
+    """
+    times_unix = n.asarray(times_unix, dtype=float).reshape(-1)
+    pos_ecef = n.asarray(pos_ecef, dtype=float)
+    if times_unix.size == 0 or pos_ecef.shape[0] == 0:
+        raise ValueError("Need measurements to build the MSIS density profile.")
+
+    lat_rad, lon_rad, hgt_m = ecef_to_geodetic_wgs84(pos_ecef)
+    lat_deg = n.rad2deg(lat_rad)
+    lon_deg = n.rad2deg(lon_rad)
+
+    ref_time_unix = float(n.mean(times_unix))
+    ref_lat_deg = float(n.mean(lat_deg))
+    ref_lon_deg = circular_mean_deg(lon_deg)
+    top_alt_m = float(max(min_top_alt_m, n.nanmax(hgt_m) + alt_pad_m))
+
+    altitude_grid_m = n.linspace(0.0, top_alt_m, int(n_altitude), dtype=float)
+    time_grid = n.full_like(altitude_grid_m, ref_time_unix, dtype=float).astype("datetime64[s]")
+    lat_grid = n.full_like(altitude_grid_m, ref_lat_deg, dtype=float)
+    lon_grid = n.full_like(altitude_grid_m, ref_lon_deg, dtype=float)
+
+    data = msis.run(
+        time_grid,
+        lat_grid,
+        lon_grid,
+        altitude_grid_m / 1e3,
+        geomagnetic_activity=-1,
+    )
+    rho_grid = _extract_msis_total_density(data)
+    if rho_grid.shape[0] != altitude_grid_m.shape[0]:
+        rho_grid = n.asarray(rho_grid).reshape(-1)
+    if rho_grid.shape[0] != altitude_grid_m.shape[0]:
+        raise ValueError("Unexpected MSIS output shape for density profile.")
+
+    rho_grid = n.maximum(rho_grid, 1e-30)
+    log_rho_interp = sint.interp1d(
+        altitude_grid_m,
+        n.log(rho_grid),
+        kind="linear",
+        bounds_error=False,
+        fill_value=(float(n.log(rho_grid[0])), float(n.log(rho_grid[-1]))),
+        assume_sorted=True,
+    )
+
+    def density_interp(altitude_m_query):
+        altitude_arr = n.asarray(altitude_m_query, dtype=float)
+        altitude_clip = n.clip(altitude_arr, altitude_grid_m[0], altitude_grid_m[-1])
+        rho_query = n.exp(log_rho_interp(altitude_clip))
+        if altitude_arr.ndim == 0:
+            return float(rho_query)
+        return n.asarray(rho_query, dtype=float)
+
+    return {
+        "reference_time_unix": ref_time_unix,
+        "reference_lat_deg": ref_lat_deg,
+        "reference_lon_deg": ref_lon_deg,
+        "altitude_grid_m": altitude_grid_m,
+        "rho_grid_kg_m3": rho_grid,
+        "interp": density_interp,
+    }
+
 def gmst_angle(unix_time):
     """
     Greenwich mean sidereal angle in radians.
@@ -365,24 +445,27 @@ def evaluate_model_at_times(times_model, values_model, times_eval):
     return n.column_stack(cols)
 
 
-def state_to_geodetic_density(pos_eci, unix_time):
+def state_to_geodetic_density(pos_eci, unix_time, density_profile=None):
     lat, lon, hgt = eci_to_geodetic(pos_eci, unix_time)
-    hgt_msis = float(n.clip(hgt, 0.0, 300e3))
-    rho_a = get_msis_density(
-        n.array([unix_time], dtype=float),
-        n.array([lat], dtype=float),
-        n.array([lon], dtype=float),
-        n.array([hgt_msis], dtype=float),
-    )[0]
+    if density_profile is None:
+        hgt_msis = float(n.clip(hgt, 0.0, 300e3))
+        rho_a = get_msis_density(
+            n.array([unix_time], dtype=float),
+            n.array([lat], dtype=float),
+            n.array([lon], dtype=float),
+            n.array([hgt_msis], dtype=float),
+        )[0]
+    else:
+        rho_a = density_profile["interp"](max(float(hgt), 0.0))
     return float(lat), float(lon), float(hgt), float(rho_a)
 
 
-def drag_state_eci(pos_eci, vel_eci, unix_time, B_now):
+def drag_state_eci(pos_eci, vel_eci, unix_time, B_now, density_profile=None):
     """
     Evaluate local atmospheric state, drag acceleration, and specific drag
     power at a single ECI state.
     """
-    lat, lon, hgt, rho_a = state_to_geodetic_density(pos_eci, unix_time)
+    lat, lon, hgt, rho_a = state_to_geodetic_density(pos_eci, unix_time, density_profile=density_profile)
     v_rel = vel_eci - atmosphere_velocity_eci(pos_eci)
     vmag_rel = n.linalg.norm(v_rel)
 
@@ -399,6 +482,72 @@ def drag_state_eci(pos_eci, vel_eci, unix_time, B_now):
     return lat, lon, hgt, rho_a, v_rel, a_drag, specific_energy_loss_rate, speed, float(vmag_rel)
 
 
+def ballistic_coefficient_uncertainty(result, times_query, B_values=None):
+    parameter_covariance = result.get("parameter_covariance")
+    if parameter_covariance is None:
+        return None
+
+    covariance = n.asarray(parameter_covariance, dtype=float)
+    if covariance.shape[0] < 8 or covariance.shape[1] < 8:
+        return None
+
+    times_query = n.asarray(times_query, dtype=float)
+    t_meas = n.asarray(result["times_unix"], dtype=float)
+    dt_model = float(result["dt_model"])
+    mtv = n.linspace(n.min(t_meas) - 2.0 * dt_model, n.max(t_meas) + 2.0 * dt_model, 2)
+    dt_span = float(mtv[1] - mtv[0])
+    if dt_span <= 0.0:
+        return None
+
+    weights = n.column_stack(
+        (
+            (mtv[1] - times_query) / dt_span,
+            (times_query - mtv[0]) / dt_span,
+        )
+    )
+    covariance_logB = covariance[6:8, 6:8]
+    logB_variance = n.einsum("ni,ij,nj->n", weights, covariance_logB, weights)
+    logB_sigma = n.sqrt(n.maximum(logB_variance, 0.0))
+
+    if B_values is None:
+        logB_hat = n.asarray(result["B0_hat"], dtype=float)
+        B_values = 10.0 ** (weights @ logB_hat)
+    else:
+        B_values = n.asarray(B_values, dtype=float)
+
+    return n.log(10.0) * B_values * logB_sigma
+
+
+def plot_sparse_errorbars(ax, x, y, yerr, max_points=24, **kwargs):
+    x = n.asarray(x, dtype=float)
+    y = n.asarray(y, dtype=float)
+    yerr = n.asarray(yerr, dtype=float)
+
+    mask = n.isfinite(x) & n.isfinite(y) & n.isfinite(yerr) & (y > 0.0) & (yerr >= 0.0)
+    if not n.any(mask):
+        return
+
+    x = x[mask]
+    y = y[mask]
+    yerr = yerr[mask]
+
+    if x.size > max_points:
+        idx = n.linspace(0, x.size - 1, max_points, dtype=int)
+        x = x[idx]
+        y = y[idx]
+        yerr = yerr[idx]
+
+    lower = n.minimum(yerr, 0.95 * y)
+    upper = yerr
+    ax.errorbar(
+        x,
+        y,
+        yerr=n.vstack((lower, upper)),
+        fmt="none",
+        **kwargs,
+    )
+
+
 def plot_ballistic_fit(result):
     t_meas = n.asarray(result["times_unix"], dtype=float)
     t0 = n.min(t_meas)
@@ -413,6 +562,8 @@ def plot_ballistic_fit(result):
     hgt_model = model["hgt_m"][order]
     B_model = model["B_model"][order]
     impact = result.get("impact")
+    impact_uncertainty = result.get("impact_uncertainty")
+    B_model_std = ballistic_coefficient_uncertainty(result, t_model, B_values=B_model)
 
     fig, axes = plt.subplots(2, 2, figsize=(10, 8))
 
@@ -451,6 +602,19 @@ def plot_ballistic_fit(result):
     axes[0, 1].legend()
 
     axes[1, 0].semilogy(t_model - t0, B_model, "-", lw=2, label="Best fit model")
+    if B_model_std is not None:
+        plot_sparse_errorbars(
+            axes[1, 0],
+            t_model - t0,
+            B_model,
+            B_model_std,
+            ecolor="0.45",
+            elinewidth=0.9,
+            alpha=0.75,
+            capsize=0,
+            zorder=5,
+            label="B uncertainty (1$\\sigma$)",
+        )
     axes[1, 0].set_xlabel("Time since first sample (s)")
     axes[1, 0].set_ylabel("B")
     axes[1, 0].legend()
@@ -478,6 +642,13 @@ def plot_ballistic_fit(result):
         lon_impact = impact_model["lon_deg"][impact_order]
         hgt_impact = impact_model["hgt_m"][impact_order]
         B_impact = impact_model["B_model"][impact_order]
+        B_impact_std = None
+        if t_impact.size > 0:
+            B_impact_std = ballistic_coefficient_uncertainty(
+                result,
+                n.full_like(t_impact, t_impact[0], dtype=float),
+                B_values=B_impact,
+            )
 
         axes[0, 0].plot(lon_impact, lat_impact, "--", lw=2, label="Extrapolated path")
         axes[0, 0].plot(
@@ -488,6 +659,34 @@ def plot_ballistic_fit(result):
             mew=2,
             label="Impact",
         )
+        if impact_uncertainty is not None:
+            theta = n.linspace(0.0, 2.0 * n.pi, 181, endpoint=True)
+            azimuth_rad = n.deg2rad(impact_uncertainty["impact_horizontal_major_axis_azimuth_deg"])
+            major_axis_m = impact_uncertainty["impact_horizontal_major_axis_1sigma_m"]
+            minor_axis_m = impact_uncertainty["impact_horizontal_minor_axis_1sigma_m"]
+            east = (
+                major_axis_m * n.sin(theta) * n.sin(azimuth_rad)
+                + minor_axis_m * n.cos(theta) * n.cos(azimuth_rad)
+            )
+            north = (
+                major_axis_m * n.sin(theta) * n.cos(azimuth_rad)
+                - minor_axis_m * n.cos(theta) * n.sin(azimuth_rad)
+            )
+            lat_scale_m_per_deg = 111320.0
+            lon_scale_m_per_deg = lat_scale_m_per_deg * max(
+                n.cos(n.deg2rad(impact["impact_lat_deg"])),
+                1e-6,
+            )
+            ellipse_lon = impact["impact_lon_deg"] + east / lon_scale_m_per_deg
+            ellipse_lat = impact["impact_lat_deg"] + north / lat_scale_m_per_deg
+            axes[0, 0].plot(
+                ellipse_lon,
+                ellipse_lat,
+                color="0.45",
+                linewidth=1.3,
+                alpha=0.95,
+                label="Impact uncertainty (1$\\sigma$)",
+            )
         axes[0, 0].legend()
 
         axes[0, 1].plot(t_impact - t0, hgt_impact / 1e3, "--", lw=2, label="Extrapolated path")
@@ -502,6 +701,18 @@ def plot_ballistic_fit(result):
         axes[0, 1].legend()
 
         axes[1, 0].semilogy(t_impact - t0, B_impact, "--", lw=2, label="Extrapolated path")
+        if B_impact_std is not None:
+            plot_sparse_errorbars(
+                axes[1, 0],
+                t_impact - t0,
+                B_impact,
+                B_impact_std,
+                ecolor="0.6",
+                elinewidth=0.8,
+                alpha=0.65,
+                capsize=0,
+                zorder=5,
+            )
         axes[1, 0].legend()
 
         axes[1, 1].plot(lon_impact, hgt_impact / 1e3, "--", lw=2, label="Extrapolated path")
@@ -708,6 +919,7 @@ def propagate(
     fixed_B=None,
     start_time=None,
     stop_at_ground=False,
+    density_profile=None,
 ):
     """
     Simple forward propagation utility used for quick inspection/debugging.
@@ -727,7 +939,6 @@ def propagate(
             if t_arr.ndim == 0:
                 return B_const
             return n.full(t_arr.shape, B_const, dtype=float)
-    print(B0)
     p = n.asarray(p0, dtype=float).copy()
     v = n.asarray(v0, dtype=float).copy()
     if start_time is None:
@@ -755,6 +966,7 @@ def propagate(
         v,
         tnow,
         B_now,
+        density_profile=density_profile,
     )
     lat_model.append(lat)
     lon_model.append(lon)
@@ -775,6 +987,7 @@ def propagate(
             v,
             tnow,
             B_now,
+            density_profile=density_profile,
         )
         a_grav = gravity_accel_eci_j2(p)
         #if vmag > 0.0:
@@ -793,6 +1006,7 @@ def propagate(
             v,
             tnow,
             B_now,
+            density_profile=density_profile,
         )
         t_model.append(tnow)
         pos_eci.append(p.copy())
@@ -926,6 +1140,7 @@ def propagate(
         "specific_energy_loss_rate_interp": specific_energy_loss_rate_interp,
         "speed_interp": speed_interp,
         "relative_speed_interp": relative_speed_interp,
+        "density_profile": density_profile,
     }
 
 
@@ -953,6 +1168,7 @@ def extrapolate_best_fit_to_ground(result, max_time_ahead=3600.0, dt=None):
         fixed_B=B_start,
         start_time=t_start,
         stop_at_ground=True,
+        density_profile=model.get("density_profile"),
     )
 
     hgt_model = extrapolation["hgt_m"]
@@ -1021,37 +1237,193 @@ def extrapolate_best_fit_to_ground(result, max_time_ahead=3600.0, dt=None):
     }
 
 
-def residuals_lm(x, t, pos_eci, dt_model, gamma_fixed):
+def build_model_from_parameters(x, t, dt_model, density_profile=None):
     p0 = x[0:3]
     v0 = x[3:6]
     B0 = x[6:8]
-#    C_L=x[8]
-#    fr_raw = n.clip(x[7:9], -10.0, 10.0)
+    model = propagate(p0, v0, t, B0=B0, dt=dt_model, density_profile=density_profile)
+    return model
 
-    # propagate() currently uses the 0.5 drag prefactor internally, so scale
-    # B0 if the caller wants to keep a different fixed gamma convention.
-    #B0_eff = B0 * (gamma_fixed / 0.5)
-    model = propagate(p0, v0, t, B0=B0, dt=dt_model)
-    model_pos = model["pos_eci_interp"](t)
+
+def residuals_lm(x, t, pos_eci, dt_model, gamma_fixed, density_profile=None):
+    bad = n.full(pos_eci.size, 1e9, dtype=float)
+
+    if not n.all(n.isfinite(x)):
+        return bad
+
+    try:
+        model = build_model_from_parameters(x, t, dt_model, density_profile=density_profile)
+        model_pos = n.asarray(model["pos_eci_interp"](t), dtype=float)
+    except Exception:
+        return bad
+
+    if not n.all(n.isfinite(model_pos)):
+        return bad
+
     residuals = model_pos - pos_eci
+    if not n.all(n.isfinite(residuals)):
+        return bad
 
-    # Give the first 100 seconds 100x weight in the least-squares objective.
-    rel_t = t - n.min(t)
-    point_weights = n.ones_like(rel_t, dtype=float)
-    #point_weights[rel_t <= 30.0] = n.sqrt(1000.0)
-#    point_weights[rel_t <= 20.0] = n.sqrt(1000.0)
- #   point_weights[rel_t <= 20.0] = n.sqrt(1000.0)
-
-    return (residuals * point_weights[:, None]).ravel()
+    return residuals.ravel()
 
 
-def objective_fmin(x, t, pos_eci, dt_model, gamma_fixed, fr_penalty_weight=1e6):
-    residuals = residuals_lm(x, t, pos_eci, dt_model, gamma_fixed)
-    #overflow = n.maximum(n.abs(x[7:9]) - 100.0, 0.0)
-    #penalty = fr_penalty_weight * n.sum(overflow**2)
-    s= float(n.sum(residuals**2))
+def objective_fmin(x, t, pos_eci, dt_model, gamma_fixed, density_profile=None):
+    residuals = residuals_lm(x, t, pos_eci, dt_model, gamma_fixed, density_profile=density_profile)
+    s = float(n.sum(residuals**2))
+    # don't remove this
     print(s)
-    return(s)
+    return s
+
+
+def parameter_step_sizes(x):
+    steps = n.array([10.0, 10.0, 10.0, 0.1, 0.1, 0.1, 1e-3, 1e-3], dtype=float)
+    if len(x) > len(steps):
+        extra = n.full(len(x) - len(steps), 1e-3, dtype=float)
+        return n.concatenate((steps, extra))
+    return steps[:len(x)]
+
+
+def finite_difference_jacobian(fun, x0, steps):
+    x0 = n.asarray(x0, dtype=float)
+    steps = n.asarray(steps, dtype=float)
+    y0 = n.atleast_1d(n.asarray(fun(x0), dtype=float))
+    jac = n.empty((y0.size, x0.size), dtype=float)
+
+    for i in range(x0.size):
+        step = float(steps[i])
+        if not n.isfinite(step) or step <= 0.0:
+            step = 1e-6
+        xp = x0.copy()
+        xm = x0.copy()
+        xp[i] += step
+        xm[i] -= step
+        yp = n.atleast_1d(n.asarray(fun(xp), dtype=float))
+        ym = n.atleast_1d(n.asarray(fun(xm), dtype=float))
+        jac[:, i] = (yp - ym) / (2.0 * step)
+
+    return jac
+
+
+def estimate_parameter_covariance(jacobian, residual_vector):
+    jacobian = n.asarray(jacobian, dtype=float)
+    residual_vector = n.asarray(residual_vector, dtype=float).reshape(-1)
+
+    if jacobian.ndim != 2:
+        raise ValueError("jacobian must be a 2D array")
+
+    m, n_params = jacobian.shape
+    if m <= n_params:
+        return None
+
+    dof = m - n_params
+    rss = float(n.sum(residual_vector**2))
+    sigma2 = rss / dof
+    covariance = sigma2 * n.linalg.pinv(jacobian.T @ jacobian)
+
+    return {
+        "covariance": covariance,
+        "std": n.sqrt(n.maximum(n.diag(covariance), 0.0)),
+        "rss": rss,
+        "dof": int(dof),
+        "sigma2": float(sigma2),
+    }
+
+
+def impact_observables_enu(impact, ref_ecef, ref_lat_deg, ref_lon_deg):
+    impact_pos_ecef = eci_to_ecef_position(
+        impact["impact_pos_eci"],
+        impact["impact_time_unix"],
+    )
+    lat_rad = n.deg2rad(ref_lat_deg)
+    lon_rad = n.deg2rad(ref_lon_deg)
+
+    rot = n.array(
+        [
+            [-n.sin(lon_rad), n.cos(lon_rad), 0.0],
+            [-n.sin(lat_rad) * n.cos(lon_rad), -n.sin(lat_rad) * n.sin(lon_rad), n.cos(lat_rad)],
+            [n.cos(lat_rad) * n.cos(lon_rad), n.cos(lat_rad) * n.sin(lon_rad), n.sin(lat_rad)],
+        ],
+        dtype=float,
+    )
+    delta_enu = rot @ (impact_pos_ecef - ref_ecef)
+    return n.array(
+        [
+            float(impact["impact_time_unix"]),
+            float(delta_enu[0]),
+            float(delta_enu[1]),
+        ],
+        dtype=float,
+    )
+
+
+def estimate_impact_uncertainty(xhat, covariance_info, t, dt_model, density_profile=None):
+    if covariance_info is None:
+        return None
+
+    nominal_model = build_model_from_parameters(xhat, t, dt_model, density_profile=density_profile)
+    nominal_result = {
+        "model": nominal_model,
+        "times_unix": t,
+        "dt_model": dt_model,
+    }
+    nominal_impact = extrapolate_best_fit_to_ground(nominal_result)
+    nominal_ecef = eci_to_ecef_position(
+        nominal_impact["impact_pos_eci"],
+        nominal_impact["impact_time_unix"],
+    )
+
+    def impact_map(x):
+        model = build_model_from_parameters(x, t, dt_model, density_profile=density_profile)
+        impact = extrapolate_best_fit_to_ground(
+            {
+                "model": model,
+                "times_unix": t,
+                "dt_model": dt_model,
+            }
+        )
+        return impact_observables_enu(
+            impact,
+            nominal_ecef,
+            nominal_impact["impact_lat_deg"],
+            nominal_impact["impact_lon_deg"],
+        )
+
+    impact_jac = finite_difference_jacobian(
+        impact_map,
+        xhat,
+        parameter_step_sizes(xhat),
+    )
+    impact_cov = impact_jac @ covariance_info["covariance"] @ impact_jac.T
+
+    time_std = float(n.sqrt(max(impact_cov[0, 0], 0.0)))
+    horizontal_cov = impact_cov[1:, 1:]
+    horizontal_std = n.sqrt(n.maximum(n.diag(horizontal_cov), 0.0))
+
+    eigvals, eigvecs = n.linalg.eigh(horizontal_cov)
+    eigvals = n.maximum(eigvals, 0.0)
+    order = n.argsort(eigvals)
+    eigvals = eigvals[order]
+    eigvecs = eigvecs[:, order]
+    major_axis = float(n.sqrt(eigvals[-1]))
+    minor_axis = float(n.sqrt(eigvals[0]))
+    major_vec = eigvecs[:, -1]
+    major_azimuth = float((n.degrees(n.arctan2(major_vec[0], major_vec[1])) + 360.0) % 360.0)
+
+    return {
+        "impact_time_std_s": time_std,
+        "impact_east_std_m": float(horizontal_std[0]),
+        "impact_north_std_m": float(horizontal_std[1]),
+        "impact_horizontal_cov_enu_m2": horizontal_cov,
+        "impact_horizontal_major_axis_1sigma_m": major_axis,
+        "impact_horizontal_minor_axis_1sigma_m": minor_axis,
+        "impact_horizontal_major_axis_azimuth_deg": major_azimuth,
+        "impact_observable_jacobian": impact_jac,
+        "parameter_covariance": covariance_info["covariance"],
+        "parameter_std": covariance_info["std"],
+        "residual_rss": covariance_info["rss"],
+        "residual_dof": covariance_info["dof"],
+        "residual_variance": covariance_info["sigma2"],
+    }
 
 
 def fit_shared_ballistic_coefficient(
@@ -1091,41 +1463,38 @@ def fit_shared_ballistic_coefficient(
     v0_guess_ecef = (pos_ecef[-1, :] - pos_ecef[0, :]) / dt_obs
 
     pos_eci = ecef_to_eci_position(pos_ecef, t)
+    density_profile = build_msis_density_profile(t, pos_ecef)
     p0_guess_eci, v0_guess_eci = ecef_to_eci_state(
         p0_guess_ecef,
         v0_guess_ecef,
         t[0],
     )
 
-    print("v0_guess_ecef", v0_guess_ecef)
-    print("p0_guess_ecef", p0_guess_ecef)
-    print("v0_guess_eci", v0_guess_eci)
-    print("p0_guess_eci", p0_guess_eci)
-#    exit(0)
+    if verbose > 1:
+        print("v0_guess_ecef", v0_guess_ecef)
+        print("p0_guess_ecef", p0_guess_ecef)
+        print("v0_guess_eci", v0_guess_eci)
+        print("p0_guess_eci", p0_guess_eci)
 
     B0_guess = n.asarray(B0_guess, dtype=float).reshape(-1)
     if B0_guess.size != 2:
         raise ValueError("B0_guess must contain exactly two values.")
 
-    x0 = n.concatenate((
-        p0_guess_eci,
-        v0_guess_eci,
-        B0_guess,
-        [-1],
-    ))
+    x0 = n.concatenate((p0_guess_eci, v0_guess_eci, B0_guess))
     if pos_eci.size < x0.size:
         raise ValueError("Need at least three 3D measurements for the fit.")
 
-    dt_model = 0.5#min(0.5, max((n.max(t) - n.min(t)) / 200.0, 0.05))
+    dt_model = 2.0#min(0.5, max((n.max(t) - n.min(t)) / 200.0, 0.05))
     xopt, fopt, iterations, funcalls, warnflag = so.fmin(
         objective_fmin,
         x0,
-        args=(t, pos_eci, dt_model, gamma_fixed),
+        args=(t, pos_eci, dt_model, gamma_fixed, density_profile),
         full_output=True,
         maxiter=4000,
         maxfun=10000,
         disp=bool(verbose > 1),
     )
+    residual_vector = residuals_lm(xopt, t, pos_eci, dt_model, gamma_fixed, density_profile=density_profile)
     optimizer = {
         "method": "fmin",
         "x": xopt,
@@ -1135,18 +1504,19 @@ def fit_shared_ballistic_coefficient(
         "warnflag": int(warnflag),
         "success": bool(warnflag == 0),
     }
+    residual_jac = finite_difference_jacobian(
+        lambda x: residuals_lm(x, t, pos_eci, dt_model, gamma_fixed, density_profile=density_profile),
+        xopt,
+        parameter_step_sizes(xopt),
+    )
+    covariance_info = estimate_parameter_covariance(residual_jac, residual_vector)
 
     xhat = n.asarray(xopt, dtype=float).copy()
-    #xhat[7:9] = n.clip(xhat[7:9], -10.0, 10.0)
 
     p0_hat_eci = xhat[0:3]
     v0_hat_eci = xhat[3:6]
     B0 = xhat[6:8]
-#    fr_raw_hat = xhat[7:9]
-    #fr_hat = sigmoid(fr_raw_hat)
-
-    #B0_hat_eff = B0_hat * (gamma_fixed / 0.5)
-    model = propagate(p0_hat_eci, v0_hat_eci, t, B0, dt=dt_model)
+    model = build_model_from_parameters(xhat, t, dt_model, density_profile=density_profile)
 
     result = {
         "times_unix": t,
@@ -1160,12 +1530,15 @@ def fit_shared_ballistic_coefficient(
         "p0_hat_eci": p0_hat_eci,
         "v0_hat_eci": v0_hat_eci,
         "B0_hat": B0,
-#        "B0_hat_effective": B0_hat_eff,
- #       "fr_raw_hat": fr_raw_hat,
-  #      "fr_hat": fr_hat,
-   #     "gamma_fixed": gamma_fixed,
         "dt_model": dt_model,
         "optimizer": optimizer,
+        "parameter_covariance": None if covariance_info is None else covariance_info["covariance"],
+        "parameter_std": None if covariance_info is None else covariance_info["std"],
+        "density_profile_altitude_m": density_profile["altitude_grid_m"],
+        "density_profile_rho_kg_m3": density_profile["rho_grid_kg_m3"],
+        "density_profile_reference_time_unix": density_profile["reference_time_unix"],
+        "density_profile_reference_lat_deg": density_profile["reference_lat_deg"],
+        "density_profile_reference_lon_deg": density_profile["reference_lon_deg"],
         "specific_energy_loss_rate_w_kg": model["specific_energy_loss_rate_w_kg"],
         "specific_energy_loss_rate_interp": model["specific_energy_loss_rate_interp"],
         "speed_m_s": model["speed_m_s"],
@@ -1175,7 +1548,7 @@ def fit_shared_ballistic_coefficient(
         "fit_parameter_names": (
             "p0_eci_x", "p0_eci_y", "p0_eci_z",
             "v0_eci_x", "v0_eci_y", "v0_eci_z",
-            "log_B00", "log_B01", "C_L",
+            "log_B00", "log_B01",
         ),
         "model": model,
     }
@@ -1184,7 +1557,25 @@ def fit_shared_ballistic_coefficient(
         result["impact"] = extrapolate_best_fit_to_ground(result)
     except ValueError as exc:
         result["impact"] = None
-#        result["impact_error"] = str(exc)
+        result["impact_error"] = str(exc)
+    else:
+        try:
+            result["impact_uncertainty"] = estimate_impact_uncertainty(
+                xhat,
+                covariance_info,
+                t,
+                dt_model,
+                density_profile=density_profile,
+            )
+        except ValueError as exc:
+            result["impact_uncertainty"] = None
+            result["impact_uncertainty_error"] = str(exc)
+        except Exception as exc:
+            result["impact_uncertainty"] = None
+            result["impact_uncertainty_error"] = str(exc)
+
+    if "impact_uncertainty" not in result:
+        result["impact_uncertainty"] = None
 
     hdf5_path = save_result_to_hdf5(result, fit_ids)
     result["hdf5_path"] = str(hdf5_path)
@@ -1201,11 +1592,25 @@ def fit_shared_ballistic_coefficient(
             print("impact_lat_deg", result["impact"]["impact_lat_deg"])
             print("impact_lon_deg", result["impact"]["impact_lon_deg"])
             print("impact_time_unix", result["impact"]["impact_time_unix"])
+            if result["impact_uncertainty"] is not None:
+                print("impact_time_std_s", result["impact_uncertainty"]["impact_time_std_s"])
+                print("impact_east_std_m", result["impact_uncertainty"]["impact_east_std_m"])
+                print("impact_north_std_m", result["impact_uncertainty"]["impact_north_std_m"])
+                print(
+                    "impact_horizontal_major_axis_1sigma_m",
+                    result["impact_uncertainty"]["impact_horizontal_major_axis_1sigma_m"],
+                )
+                print(
+                    "impact_horizontal_minor_axis_1sigma_m",
+                    result["impact_uncertainty"]["impact_horizontal_minor_axis_1sigma_m"],
+                )
+            elif "impact_uncertainty_error" in result:
+                print("impact_uncertainty_error", result["impact_uncertainty_error"])
         elif "impact_error" in result:
             print("impact_error", result["impact_error"])
         plot_ballistic_fit(result)
-        plot_density_profile(result)
-        plot_specific_energy_loss_rate(result)
-        plot_velocity_scatter(result)
+        #plot_density_profile(result)
+        #plot_specific_energy_loss_rate(result)
+        #plot_velocity_scatter(result)
 
     return result
