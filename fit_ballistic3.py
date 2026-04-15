@@ -699,53 +699,6 @@ def plot_lon_height_colored(
 
 
 
-def collect_data(fid,fpos,ftimes,ids):
-    pos=[]
-    tv=[]
-    for i in range(len(fid)):
-        if fid[i] in ids:
-            pos.append(fpos[i])        
-            tv.append(ftimes[i])
-    tv=n.concatenate(tv)
-    pos=n.concatenate(pos)
-    order = n.argsort(tv, kind="mergesort")
-    tv = n.asarray(tv[order], dtype=float)
-    pos = n.asarray(pos[order], dtype=float)
-    print(pos.shape)
-    print(tv.shape)
-    return(tv,pos)
-
-
-def collect_data_merged(fid, fpos, ftimes, ids):
-    """
-    Collect and sort the selected fragment measurements, then merge samples
-    that fall within the same integer Unix second by averaging their times and
-    ECEF positions.
-    """
-    tv, pos = collect_data(fid, fpos, ftimes, ids)
-    if tv.size == 0:
-        return tv, pos
-
-    second_bins = n.floor(tv).astype(n.int64)
-    unique_seconds, first_idx, counts = n.unique(
-        second_bins,
-        return_index=True,
-        return_counts=True,
-    )
-
-    t_merged = n.empty(unique_seconds.size, dtype=float)
-    pos_merged = n.empty((unique_seconds.size, pos.shape[1]), dtype=float)
-
-    for i, (start, count) in enumerate(zip(first_idx, counts)):
-        sl = slice(start, start + count)
-        t_merged[i] = n.mean(tv[sl])
-        pos_merged[i] = n.mean(pos[sl], axis=0)
-
-    print(pos_merged.shape)
-    print(t_merged.shape)
-    return t_merged, pos_merged
-
-
 def propagate(
     p0,
     v0,
@@ -1102,8 +1055,8 @@ def objective_fmin(x, t, pos_eci, dt_model, gamma_fixed, fr_penalty_weight=1e6):
 
 
 def fit_shared_ballistic_coefficient(
-                                    fragment_ids,
                                     fragment_pos,
+                                    fragment_pos_err,
                                     fragment_times,
                                     fit_ids,
                                     gamma=0.5,
@@ -1113,10 +1066,28 @@ def fit_shared_ballistic_coefficient(
     # initial ECI state, B0, fr1, and fr2.
     gamma_fixed = float(gamma)
 
-    t, pos_ecef = collect_data_merged(fragment_ids, fragment_pos, fragment_times, fit_ids)
+    t = n.asarray(fragment_times, dtype=float).reshape(-1)
+    pos_ecef = n.asarray(fragment_pos, dtype=float)
+    pos_ecef_err = n.asarray(fragment_pos_err, dtype=float).reshape(-1)
+
+    if pos_ecef.ndim != 2 or pos_ecef.shape[1] != 3:
+        raise ValueError("fragment_pos must have shape (n, 3)")
+    if t.shape[0] != pos_ecef.shape[0]:
+        raise ValueError("fragment_times and fragment_pos must have the same length")
+    if pos_ecef_err.shape[0] != pos_ecef.shape[0]:
+        raise ValueError("fragment_pos_err and fragment_pos must have the same length")
+    if t.size < 3:
+        raise ValueError("Need at least three 3D measurements for the fit.")
+
+    order = n.argsort(t, kind="mergesort")
+    t = t[order]
+    pos_ecef = pos_ecef[order, :]
+    pos_ecef_err = pos_ecef_err[order]
 
     p0_guess_ecef = pos_ecef[0, :]
     dt_obs = t[-1] - t[0]
+    if dt_obs <= 0.0:
+        raise ValueError("Need observations spanning a non-zero time interval.")
     v0_guess_ecef = (pos_ecef[-1, :] - pos_ecef[0, :]) / dt_obs
 
     pos_eci = ecef_to_eci_position(pos_ecef, t)
@@ -1132,10 +1103,14 @@ def fit_shared_ballistic_coefficient(
     print("p0_guess_eci", p0_guess_eci)
 #    exit(0)
 
+    B0_guess = n.asarray(B0_guess, dtype=float).reshape(-1)
+    if B0_guess.size != 2:
+        raise ValueError("B0_guess must contain exactly two values.")
+
     x0 = n.concatenate((
         p0_guess_eci,
         v0_guess_eci,
-        [-3,-3],
+        B0_guess,
         [-1],
     ))
     if pos_eci.size < x0.size:
@@ -1176,6 +1151,7 @@ def fit_shared_ballistic_coefficient(
     result = {
         "times_unix": t,
         "pos_ecef": pos_ecef,
+        "pos_ecef_err": pos_ecef_err,
         "pos_eci": pos_eci,
         "p0_guess_ecef": p0_guess_ecef,
         "v0_guess_ecef": v0_guess_ecef,
@@ -1199,7 +1175,7 @@ def fit_shared_ballistic_coefficient(
         "fit_parameter_names": (
             "p0_eci_x", "p0_eci_y", "p0_eci_z",
             "v0_eci_x", "v0_eci_y", "v0_eci_z",
-            "log_B00", "log_B01", "log_B02", "C_L",
+            "log_B00", "log_B01", "C_L",
         ),
         "model": model,
     }
