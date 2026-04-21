@@ -548,6 +548,76 @@ def plot_sparse_errorbars(ax, x, y, yerr, max_points=24, **kwargs):
     )
 
 
+def style_publication_axis(ax):
+    ax.grid(True, linestyle="--", linewidth=0.55, alpha=0.35, color="0.55")
+    ax.tick_params(direction="out", length=4, width=0.8)
+
+
+def load_fragment_geo_pos_for_plot():
+    try:
+        import plot_fragments as pf
+    except Exception:
+        return None
+
+    try:
+        _, _, _, _, _, fragment_geo_pos, _ = pf.get_fragments()
+    except Exception:
+        return None
+
+    return fragment_geo_pos
+
+
+def plot_measurement_context_lon_alt(ax, fig, result, t0):
+    t_meas = n.asarray(result["times_unix"], dtype=float)
+    lat_meas, lon_meas, hgt_meas = eci_to_geodetic(result["pos_eci"], t_meas)
+    context_geo = load_fragment_geo_pos_for_plot()
+
+    background_labeled = False
+    if context_geo is not None:
+        for geo in context_geo:
+            geo = n.asarray(geo, dtype=float)
+            if geo.size == 0:
+                continue
+            ax.plot(
+                geo[:, 1],
+                geo[:, 2] / 1e3,
+                ".",
+                color="0.80",
+                markersize=2.5,
+                alpha=0.45,
+                zorder=1,
+                rasterized=True,
+                label="All fragment measurements" if not background_labeled else None,
+            )
+            background_labeled = True
+
+    time_rel = t_meas - float(t0)
+    sc = ax.scatter(
+        lon_meas,
+        hgt_meas / 1e3,
+        c=time_rel,
+        cmap="viridis",
+        s=26,
+        linewidths=0,
+        alpha=0.95,
+        zorder=4,
+        rasterized=True,
+        label="Merged measurements",
+    )
+    ax.plot(
+        lon_meas,
+        hgt_meas / 1e3,
+        color="0.20",
+        linewidth=1.0,
+        alpha=0.70,
+        zorder=3,
+    )
+    cbar = fig.colorbar(sc, ax=ax, pad=0.01, fraction=0.055)
+    cbar.set_label("Time since first measurement (s)")
+
+    return lon_meas, hgt_meas / 1e3
+
+
 def plot_ballistic_fit(result):
     t_meas = n.asarray(result["times_unix"], dtype=float)
     t0 = n.min(t_meas)
@@ -565,12 +635,35 @@ def plot_ballistic_fit(result):
     impact_uncertainty = result.get("impact_uncertainty")
     B_model_std = ballistic_coefficient_uncertainty(result, t_model, B_values=B_model)
 
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+    fig, axes = plt.subplot_mosaic(
+        [["map", "time"], ["B", "lonalt"]],
+        figsize=(11.5, 8.4),
+        constrained_layout=True,
+    )
 
-    axes[0, 0].plot(lon_model, lat_model, "-", lw=2, label="Best fit model")
-    axes[0, 0].plot(lon_meas, lat_meas, ".", ms=5, label="Measurements")
+    ax_map = axes["map"]
+    ax_time = axes["time"]
+    ax_B = axes["B"]
+    ax_lonalt = axes["lonalt"]
+
+    model_color = "tab:blue"
+    extrap_color = "tab:orange"
+    measurement_color = "0.15"
+
+    ax_map.plot(lon_model, lat_model, "-", lw=2.2, color=model_color, label="Best-fit trajectory")
+    ax_map.plot(
+        lon_meas,
+        lat_meas,
+        "o",
+        ms=4.5,
+        color=measurement_color,
+        markeredgecolor="white",
+        markeredgewidth=0.4,
+        label="Fitted measurements",
+        zorder=8,
+    )
     for i, (frag_id, lat_frag, lon_frag) in enumerate(RECOVERED_FRAGMENTS):
-        axes[0, 0].plot(
+        ax_map.plot(
             lon_frag,
             lat_frag,
             marker="*",
@@ -582,7 +675,7 @@ def plot_ballistic_fit(result):
             label="Recovered fragment" if i == 0 else None,
             zorder=16,
         )
-        axes[0, 0].text(
+        ax_map.text(
             lon_frag + 0.02,
             lat_frag + 0.02,
             frag_id,
@@ -591,20 +684,30 @@ def plot_ballistic_fit(result):
             va="bottom",
             zorder=17,
         )
-    axes[0, 0].set_xlabel("Longitude (deg)")
-    axes[0, 0].set_ylabel("Latitude (deg)")
-    axes[0, 0].legend()
+    ax_map.set_xlabel("Longitude (deg)")
+    ax_map.set_ylabel("Latitude (deg)")
+    style_publication_axis(ax_map)
 
-    axes[0, 1].plot(t_model - t0, hgt_model / 1e3, "-", lw=2, label="Best fit model")
-    axes[0, 1].plot(t_meas - t0, hgt_meas / 1e3, ".", ms=5, label="Measurements")
-    axes[0, 1].set_xlabel("Time since first sample (s)")
-    axes[0, 1].set_ylabel("Height (km)")
-    axes[0, 1].legend()
+    ax_time.plot(t_model - t0, hgt_model / 1e3, "-", lw=2.2, color=model_color, label="Best-fit trajectory")
+    ax_time.plot(
+        t_meas - t0,
+        hgt_meas / 1e3,
+        "o",
+        ms=4.5,
+        color=measurement_color,
+        markeredgecolor="white",
+        markeredgewidth=0.4,
+        label="Fitted measurements",
+        zorder=8,
+    )
+    ax_time.set_xlabel("Time since first measurement (s)")
+    ax_time.set_ylabel("Height (km)")
+    style_publication_axis(ax_time)
 
-    axes[1, 0].semilogy(t_model - t0, B_model, "-", lw=2, label="Best fit model")
+    ax_B.semilogy(t_model - t0, B_model, "-", lw=2.2, color=model_color, label="Best-fit trajectory")
     if B_model_std is not None:
         plot_sparse_errorbars(
-            axes[1, 0],
+            ax_B,
             t_model - t0,
             B_model,
             B_model_std,
@@ -615,24 +718,33 @@ def plot_ballistic_fit(result):
             zorder=5,
             label="B uncertainty (1$\\sigma$)",
         )
-    axes[1, 0].set_xlabel("Time since first sample (s)")
-    axes[1, 0].set_ylabel("B")
-    axes[1, 0].legend()
+    ax_B.set_xlabel("Time since first measurement (s)")
+    ax_B.set_ylabel("Ballistic coefficient, $B$")
+    style_publication_axis(ax_B)
 
-    axes[1, 1].plot(lon_model, hgt_model / 1e3, "-", lw=2, label="Best fit model")
-    axes[1, 1].plot(lon_meas, hgt_meas / 1e3, ".", ms=5, label="Measurements")
+    plot_measurement_context_lon_alt(ax_lonalt, fig, result, t0)
+    ax_lonalt.plot(
+        lon_model,
+        hgt_model / 1e3,
+        "-",
+        lw=2.2,
+        color=model_color,
+        label="Best-fit trajectory",
+        zorder=9,
+    )
     for i, (_, _, lon_frag) in enumerate(RECOVERED_FRAGMENTS):
-        axes[1, 1].axvline(
+        ax_lonalt.axvline(
             lon_frag,
             color="red",
             linestyle="--",
-            linewidth=0.8,
+            linewidth=0.9,
+            alpha=0.8,
             zorder=8,
             label="Recovered fragment longitude" if i == 0 else None,
         )
-    axes[1, 1].set_xlabel("Longitude (deg)")
-    axes[1, 1].set_ylabel("Height (km)")
-    axes[1, 1].legend()
+    ax_lonalt.set_xlabel("Longitude (deg)")
+    ax_lonalt.set_ylabel("Height (km)")
+    style_publication_axis(ax_lonalt)
 
     if impact is not None:
         impact_model = impact["trajectory"]
@@ -650,14 +762,22 @@ def plot_ballistic_fit(result):
                 B_values=B_impact,
             )
 
-        axes[0, 0].plot(lon_impact, lat_impact, "--", lw=2, label="Extrapolated path")
-        axes[0, 0].plot(
+        ax_map.plot(
+            lon_impact,
+            lat_impact,
+            "--",
+            lw=2.0,
+            color=extrap_color,
+            label="Extrapolated trajectory",
+        )
+        ax_map.plot(
             impact["impact_lon_deg"],
             impact["impact_lat_deg"],
             "x",
             ms=8,
             mew=2,
             label="Impact",
+            color=extrap_color,
         )
         if impact_uncertainty is not None:
             theta = n.linspace(0.0, 2.0 * n.pi, 181, endpoint=True)
@@ -679,7 +799,7 @@ def plot_ballistic_fit(result):
             )
             ellipse_lon = impact["impact_lon_deg"] + east / lon_scale_m_per_deg
             ellipse_lat = impact["impact_lat_deg"] + north / lat_scale_m_per_deg
-            axes[0, 0].plot(
+            ax_map.plot(
                 ellipse_lon,
                 ellipse_lat,
                 color="0.45",
@@ -687,23 +807,34 @@ def plot_ballistic_fit(result):
                 alpha=0.95,
                 label="Impact uncertainty (1$\\sigma$)",
             )
-        axes[0, 0].legend()
-
-        axes[0, 1].plot(t_impact - t0, hgt_impact / 1e3, "--", lw=2, label="Extrapolated path")
-        axes[0, 1].plot(
+        ax_time.plot(
+            t_impact - t0,
+            hgt_impact / 1e3,
+            "--",
+            lw=2.0,
+            color=extrap_color,
+            label="Extrapolated trajectory",
+        )
+        ax_time.plot(
             impact["impact_time_unix"] - t0,
             impact["impact_hgt_m"] / 1e3,
             "x",
             ms=8,
             mew=2,
             label="Impact",
+            color=extrap_color,
         )
-        axes[0, 1].legend()
-
-        axes[1, 0].semilogy(t_impact - t0, B_impact, "--", lw=2, label="Extrapolated path")
+        ax_B.semilogy(
+            t_impact - t0,
+            B_impact,
+            "--",
+            lw=2.0,
+            color=extrap_color,
+            label="Extrapolated trajectory",
+        )
         if B_impact_std is not None:
             plot_sparse_errorbars(
-                axes[1, 0],
+                ax_B,
                 t_impact - t0,
                 B_impact,
                 B_impact_std,
@@ -713,20 +844,28 @@ def plot_ballistic_fit(result):
                 capsize=0,
                 zorder=5,
             )
-        axes[1, 0].legend()
-
-        axes[1, 1].plot(lon_impact, hgt_impact / 1e3, "--", lw=2, label="Extrapolated path")
-        axes[1, 1].plot(
+        ax_lonalt.plot(
+            lon_impact,
+            hgt_impact / 1e3,
+            "--",
+            lw=2.0,
+            color=extrap_color,
+            label="Extrapolated trajectory",
+            zorder=9,
+        )
+        ax_lonalt.plot(
             impact["impact_lon_deg"],
             impact["impact_hgt_m"] / 1e3,
             "x",
             ms=8,
             mew=2,
             label="Impact",
+            color=extrap_color,
+            zorder=10,
         )
-        axes[1, 1].legend()
+    for ax in (ax_map, ax_time, ax_B, ax_lonalt):
+        ax.legend(frameon=True, framealpha=0.95, facecolor="white", edgecolor="0.85")
 
-    fig.tight_layout()
     plt.show()
 
 
