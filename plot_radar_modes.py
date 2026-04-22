@@ -109,6 +109,10 @@ def get_radar_detections(directory="SIMONe_geodetic_Falcon_2025"):
     snrs=[]
     times=[]
     modes=[]
+    tx_gps_list=[]
+    rx_gps_list=[]
+    link_names=[]
+    dopplers=[]
     
     data_date = None
     
@@ -121,6 +125,16 @@ def get_radar_detections(directory="SIMONe_geodetic_Falcon_2025"):
             snrs.append(h["peak_power_db"][()])
             ts = h["time_unix"][()]
             times.append(ts)
+            if "doppler_hz" in h:
+                dopplers.append(h["doppler_hz"][()])
+            else:
+                dopplers.append(n.zeros(len(ts)))
+            
+            # Extract station info from attributes
+            tx_gps_list.append(h.attrs.get("tx_gps", n.array([0,0,0])))
+            rx_gps_list.append(h.attrs.get("rx_gps", n.array([0,0,0])))
+            link_names.append(h.attrs.get("link_name", os.path.basename(f)))
+            
             h.close()
             
             if data_date is None and len(ts) > 0:
@@ -139,12 +153,13 @@ def get_radar_detections(directory="SIMONe_geodetic_Falcon_2025"):
         except Exception as e:
             print(f"Error reading {f}: {e}")
             
-    return(lats,lons,alts,snrs,times,modes,data_date)
+    return(lats,lons,alts,snrs,times,modes,data_date,tx_gps_list,rx_gps_list,link_names,dopplers)
 
 
 """
 Examples
 python plot_radar_modes.py --time-lim 03:45:50 03:47:00 --time-view 03:45:50 03:47:00 --alt-lim 40 75 --lon-view 9 15 --lat-view 52.5 53.25 --lat-lim 52.5 53.25 --snr -20 --time-offset 0
+python plot_radar_modes.py --time-lim 03:45:50 03:47:00 --time-view 03:45:50 03:47:00 --alt-lim 40 75 --lon-view 9 15 --lat-view 52.5 53.25 --lat-lim 52.5 53.25 --snr 0 --time-offset 0
 """
 
 if __name__ == "__main__":
@@ -152,6 +167,7 @@ if __name__ == "__main__":
     parser.add_argument("--snr", type=float, default=-20.0, help="SNR threshold for filtering radar detections (default: -20.0)")
     parser.add_argument("--dir", type=str, default="figures_radar", help="Directory to save figures (default: figures_radar)")
     parser.add_argument("--time-offset", type=float, default=0.0, help="Time offset in seconds to add to radar data (default: 0.0)")
+    parser.add_argument("--radar-freq", type=float, default=32.55e6, help="Radar frequency in Hz (default: 32.5e6)")
     
     # Filter arguments
     parser.add_argument("--lat-lim", type=float, nargs=2, help="Latitude filtering limits (min max)")
@@ -170,6 +186,7 @@ if __name__ == "__main__":
     snrthresh = args.snr
     save_dir = args.dir
     time_offset = args.time_offset
+    radar_freq = args.radar_freq
     fname_suffix = f"_dt={time_offset}s"
 
     if not os.path.exists(save_dir):
@@ -178,7 +195,7 @@ if __name__ == "__main__":
 
     print(f"Gathering data with SNR threshold = {snrthresh} and time offset = {time_offset}s...")
     hgt_count,hgt_count_all,fragment_ids,fragment_pos,fragment_pos_err,fragment_geo_pos,fragment_times=get_fragments()
-    rlat,rlon,ralt,rsnr,rtime,rmode, data_date = get_radar_detections()
+    rlat,rlon,ralt,rsnr,rtime,rmode, data_date, tx_gps_list, rx_gps_list, link_names, rdoppler = get_radar_detections()
 
     if data_date is None:
         data_date = date.today() # Fallback
@@ -223,6 +240,17 @@ if __name__ == "__main__":
     def fit_lat(t): return n.polyval(p_lat, t - t0)
     def fit_lon(t): return n.polyval(p_lon, t - t0)
     def fit_alt(t): return n.polyval(p_alt, t - t0)
+    
+    # Estimate mean velocity from fit
+    t_samples = n.linspace(all_f_t.min(), all_f_t.max(), 100)
+    dt_v = 0.1
+    speeds = []
+    for ts in t_samples:
+        p1 = n.array(jcoord.geodetic2ecef(fit_lat(ts), fit_lon(ts), fit_alt(ts)))
+        p2 = n.array(jcoord.geodetic2ecef(fit_lat(ts+dt_v), fit_lon(ts+dt_v), fit_alt(ts+dt_v)))
+        speeds.append(n.linalg.norm(p2-p1)/dt_v)
+    mean_speed = n.mean(speeds)
+    print(f"Estimated Mean Velocity along trajectory: {mean_speed:.2f} m/s")
 
     # Apply filters
     def apply_filters(i):
@@ -489,7 +517,7 @@ if __name__ == "__main__":
 
         plt.xlabel("Longitude")
         plt.ylabel("Latitude")
-        plt.title(f"Fragment tracks and Fit, $\Delta t = {time_offset}$s")
+        plt.title(f"Fragment tracks and Fit, v ~ {mean_speed:.0f} m/s, $\Delta t = {time_offset}$s")
         plt.legend(frameon=False, loc="best")        
         gl = ax.gridlines(draw_labels=True, dms=True, x_inline=False, y_inline=False)
         map_path = os.path.join(save_dir, f"radar_modes_map{fname_suffix}.png")
@@ -497,3 +525,133 @@ if __name__ == "__main__":
         print(f"Saved {map_path}")
     except Exception as e:
         print(f"Cartopy plotting failed: {e}")
+
+    # =========================================================
+    # Doppler Plot
+    # =========================================================
+    print(f"Generating Doppler Plot using estimated velocity (~{mean_speed:.0f} m/s)...")
+    def calculate_theoretical_doppler(t, tx_gps, rx_gps, p_lat, p_lon, p_alt, t0, freq=32.5e6):
+        # Speed of light
+        c = 299792458.0
+        # Position at t
+        lat = n.polyval(p_lat, t - t0)
+        lon = n.polyval(p_lon, t - t0)
+        alt = n.polyval(p_alt, t - t0)
+        p_ecef = n.array(jcoord.geodetic2ecef(lat, lon, alt))
+        
+        # Velocity direction at t
+        dt = 0.01
+        lat2 = n.polyval(p_lat, t + dt - t0)
+        lon2 = n.polyval(p_lon, t + dt - t0)
+        alt2 = n.polyval(p_alt, t + dt - t0)
+        p2_ecef = n.array(jcoord.geodetic2ecef(lat2, lon2, alt2))
+        
+        v_target = (p2_ecef - p_ecef) / dt
+        
+        # Station positions
+        tx_ecef = n.array(jcoord.geodetic2ecef(tx_gps[0], tx_gps[1], tx_gps[2]))
+        rx_ecef = n.array(jcoord.geodetic2ecef(rx_gps[0], rx_gps[1], rx_gps[2]))
+        
+        # Unit vectors from stations to target
+        n1 = p_ecef - tx_ecef
+        n2 = p_ecef - rx_ecef
+        u_tx = n1 / n.linalg.norm(n1)
+        u_rx = n2 / n.linalg.norm(n2)
+        
+        # Range rate (d/dt of path length)
+        range_rate = n.dot(v_target, u_tx) + n.dot(v_target, u_rx)
+        
+        # Doppler shift (Hz)
+        # f_d = - (f/c) * dR/dt
+        doppler_hz = -(freq / c) * range_rate
+
+        # Bragg vector direction (unit vector of the sum of LOS unit vectors)
+        bragg_dir = u_tx + u_rx
+        bragg_norm = n.linalg.norm(bragg_dir)
+        if bragg_norm > 1e-6:
+            bragg_unit = bragg_dir / bragg_norm
+            v_bragg = n.dot(v_target, bragg_unit)
+        else:
+            v_bragg = 0.0
+            
+        return range_rate, v_bragg, doppler_hz
+
+    fig, axs = plt.subplots(2, 1, figsize=(6, 8), sharex=True, constrained_layout=True)
+    t_doppler = n.linspace(all_f_t[0], all_f_t[-1], 200)
+    
+    unique_links = {}
+    for i in range(len(link_names)):
+        if link_names[i] not in unique_links:
+            unique_links[link_names[i]] = (tx_gps_list[i], rx_gps_list[i])
+            
+    for link_name, coords in unique_links.items():
+        tx_gps, rx_gps = coords
+        v_range_rates = []
+        v_braggs = []
+        v_dopplers = []
+        for t in t_doppler:
+            rr, vb, fd = calculate_theoretical_doppler(t, tx_gps, rx_gps, p_lat, p_lon, p_alt, t0, freq=radar_freq)
+            v_range_rates.append(rr)
+            v_braggs.append(vb)
+            v_dopplers.append(fd)
+            
+        axs[0].plot(unix_to_datetime(t_doppler), v_dopplers, label=link_name)
+        axs[1].plot(unix_to_datetime(t_doppler), v_braggs, label=link_name)
+    
+    axs[0].set_ylabel("Doppler Shift (Hz)")
+    axs[0].set_title(f"Theoretical Doppler @ {radar_freq/1e6:.2f} MHz (Estimated Velocity)")
+    axs[0].legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small', frameon=False)
+    
+    axs[1].set_ylabel("Bragg Projection Velocity (m/s)")
+    axs[1].set_xlabel("Time (UTC)")
+    axs[1].set_title(f"Velocity Projection on Bragg Vector")
+    # axs[1].legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small')
+    
+    for ax in axs:
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(formatter)
+    
+    doppler_path = os.path.join(save_dir, f"radar_theoretical_doppler{fname_suffix}.png")
+    plt.savefig(doppler_path)
+    print(f"Saved {doppler_path}")
+
+    # =========================================================
+    # Combined Doppler Plot
+    # =========================================================
+    print("Generating Combined Doppler Plot...")
+    
+    fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
+    
+    for idx, (link_name, coords) in enumerate(unique_links.items()):
+        tx_gps, rx_gps = coords
+        
+        # Theoretical
+        v_dopplers = []
+        for t in t_doppler:
+            _, _, fd = calculate_theoretical_doppler(t, tx_gps, rx_gps, p_lat, p_lon, p_alt, t0, freq=radar_freq)
+            v_dopplers.append(fd)
+        
+        # Consistent color for data and theory
+        color = f"C{idx % 10}"
+        line, = ax.plot(unix_to_datetime(t_doppler), v_dopplers, "--", alpha=0.8, color=color, label=f"{link_name} theory")
+        
+        # Measured
+        for i in range(len(link_names)):
+            if link_names[i] == link_name:
+                ridx = apply_filters(i)
+                if len(ridx) > 0:
+                    ax.plot(unix_to_datetime(rtime[i][ridx]), rdoppler[i][ridx], 
+                            ".", alpha=0.4, ms=2, color=color, label=None)
+    
+    ax.set_ylabel("Doppler (Hz)")
+    ax.set_xlabel("Time (UTC)")
+    ax.set_title(f"Doppler Shift @ {radar_freq/1e6:.2f} MHz (Estimated Velocity)")
+    ax.set_ylim(-50, 50)
+    ax.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize='x-small', frameon=False)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(formatter)
+    ax.grid(True, alpha=0.2)
+    
+    combined_doppler_path = os.path.join(save_dir, f"radar_combined_doppler{fname_suffix}.png")
+    plt.savefig(combined_doppler_path)
+    print(f"Saved {combined_doppler_path}")
