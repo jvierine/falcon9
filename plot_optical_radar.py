@@ -5,6 +5,506 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import numpy as n
 
+PANEL_CUSTOM_OFFSETS = {
+    "1": [2, 0],
+    "2": [-2, 0],
+    "3": [4, 0],
+    "4": [-2.5, 0],
+    "5": [3, 0],
+    "8": [-3, 0],
+    "7": [-6, 0],
+    "9": [4, -0.3],
+    "c": [-4, -0.2],
+    "a": [-5, 0],
+    "h": [-6, 0],
+    "g": [-7, 0],
+    "o": [3, 0],
+    "n": [5, 0],
+    "p": [4, 0.2],
+    "r": [8, 0.4],
+    "s": [4, 0.0],
+    "w": [6, 0.0],
+    "v": [7, 0.3],
+    "x": [2, 0.0],
+    "z": [2, 0.2],
+    "t": [-6, -0.2],
+    "u": [-6, -0.2],
+    "e": [-7, -0.2],
+    "d": [-7, -0.2],
+    "i": [-6, -0.2],
+    "m": [-6, -0.2],
+    "l": [-8, -0.2],
+    "j": [-10, -0.2],
+    "k": [-12, -0.2],
+}
+
+
+def publication_panel_style(font_scale=1.0):
+    scale = float(font_scale)
+    return {
+        "axis_label_fontsize": 17.0 * scale,
+        "tick_label_fontsize": 14.0 * scale,
+        "legend_fontsize": 12.0 * scale,
+        "annotation_fontsize": 8.0 * scale,
+        "colorbar_label_fontsize": 16.0 * scale,
+        "title_fontsize": 15.0 * scale,
+        "line_width": 1.1,
+        "marker_size": 4.0,
+    }
+
+
+def publication_rcparams(font_scale=1.0):
+    style = publication_panel_style(font_scale=font_scale)
+    return {
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "font.size": style["tick_label_fontsize"],
+        "axes.titlesize": style["title_fontsize"],
+        "axes.labelsize": style["axis_label_fontsize"],
+        "legend.fontsize": style["legend_fontsize"],
+        "xtick.labelsize": style["tick_label_fontsize"],
+        "ytick.labelsize": style["tick_label_fontsize"],
+        "lines.linewidth": style["line_width"],
+        "lines.markersize": style["marker_size"],
+        "figure.dpi": 300,
+        "savefig.dpi": 300,
+    }
+
+
+def _panel_fragment_data():
+    import plot_fragments as plf
+
+    return plf.get_fragments()
+
+
+def _panel_radar_data():
+    import plot_fragments as plf
+
+    return plf.get_radar_detections()
+
+
+def _plot_optical_measurements(
+    ax,
+    fragment_ids,
+    fragment_geo_pos,
+    fragment_pos_err,
+    optical_color_mode="gray",
+    show_ids=True,
+    annotation_fontsize=8.0,
+):
+    meters_to_deg_lat = 1.0 / 111320.0
+
+    for i in range(len(fragment_ids)):
+        lon_pts = fragment_geo_pos[i][:, 1]
+        lat_pts = fragment_geo_pos[i][:, 0]
+        alt_pts_km = fragment_geo_pos[i][:, 2] / 1e3
+        err_m = 2.0 * fragment_pos_err[i]
+        lon_err_deg = err_m * (meters_to_deg_lat / np.cos(np.deg2rad(lat_pts)))
+
+        point_color = "gray" if optical_color_mode == "gray" else f"C{i % 10}"
+        edge_color = "lightgray" if optical_color_mode == "gray" else "gray"
+
+        ax.errorbar(
+            lon_pts,
+            alt_pts_km,
+            xerr=lon_err_deg,
+            yerr=(err_m / 1e3),
+            fmt=".",
+            label="Optical detection" if i == 0 else None,
+            zorder=15,
+            ecolor=edge_color,
+            elinewidth=0.8,
+            capsize=2,
+            color=point_color,
+            alpha=0.9,
+        )
+
+        if not show_ids:
+            continue
+
+        fid = fragment_ids[i]
+        loni0 = np.argmin(lon_pts)
+        alt0 = alt_pts_km[loni0]
+        lon0 = lon_pts[loni0]
+        offset = PANEL_CUSTOM_OFFSETS.get(fid, [2, 0])
+        label_color = "gray" if optical_color_mode == "gray" else point_color
+        if fid not in ("1", "2"):
+            ax.scatter(lon0 + offset[1], alt0 + offset[0], s=120, color="white", zorder=19)
+            ax.text(
+                lon0 + offset[1],
+                alt0 + offset[0],
+                fid,
+                color=label_color,
+                fontsize=annotation_fontsize,
+                va="center",
+                ha="center",
+                zorder=20,
+            )
+
+
+def _annotate_orbgen_fragment_columns(
+    ax,
+    fragment_ids,
+    fragment_geo_pos,
+    fragment_times,
+    annotation_fontsize=12.0,
+    altitude_margin_km=7.0,
+    stack_spacing_km=3.8,
+):
+    columns = {}
+
+    for i, fid in enumerate(fragment_ids):
+        lon_pts = np.asarray(fragment_geo_pos[i][:, 1], dtype=float)
+        alt_pts_km = np.asarray(fragment_geo_pos[i][:, 2], dtype=float) / 1e3
+        times = np.asarray(fragment_times[i])
+        if lon_pts.size == 0 or alt_pts_km.size == 0 or times.size == 0:
+            continue
+
+        start_idx = int(np.argmin(times))
+        start_lon = float(lon_pts[start_idx])
+        column_lon = float(np.round(start_lon))
+
+        columns.setdefault(column_lon, []).append(
+            {
+                "fid": fid,
+                "lowest_alt": float(np.min(alt_pts_km)),
+                "color": f"C{i % 10}",
+            }
+        )
+
+    for column_lon, items in columns.items():
+        items.sort(key=lambda item: (-item["lowest_alt"], item["fid"]))
+        nearby_alts = []
+        for geo_pos in fragment_geo_pos:
+            lon_pts = np.asarray(geo_pos[:, 1], dtype=float)
+            alt_pts_km = np.asarray(geo_pos[:, 2], dtype=float) / 1e3
+            mask = np.isfinite(lon_pts) & np.isfinite(alt_pts_km) & (np.abs(lon_pts - column_lon) <= 1.0)
+            if np.any(mask):
+                nearby_alts.append(float(np.min(alt_pts_km[mask])))
+
+        if len(nearby_alts) > 0:
+            base_alt = min(nearby_alts) - altitude_margin_km
+        else:
+            base_alt = min(item["lowest_alt"] for item in items) - altitude_margin_km
+
+        for idx, item in enumerate(items):
+            label_alt = base_alt - idx * stack_spacing_km
+            ax.text(
+                column_lon,
+                label_alt,
+                item["fid"],
+                color=item["color"],
+                fontsize=annotation_fontsize,
+                fontweight="bold",
+                va="top",
+                ha="center",
+                zorder=30,
+                bbox={
+                    "facecolor": "white",
+                    "edgecolor": "none",
+                    "alpha": 0.9,
+                    "pad": 0.35,
+                },
+            )
+
+
+def plot_orbgen_lon_alt_panel(ax, title=None, font_scale=1.0):
+    from matplotlib.lines import Line2D
+
+    style = publication_panel_style(font_scale=font_scale)
+    _, _, fragment_ids, fragment_pos, fragment_pos_err, fragment_geo_pos, fragment_times = _panel_fragment_data()
+
+    _plot_optical_measurements(
+        ax,
+        fragment_ids,
+        fragment_geo_pos,
+        fragment_pos_err,
+        optical_color_mode="color",
+        show_ids=False,
+        annotation_fontsize=style["annotation_fontsize"],
+    )
+
+    _annotate_orbgen_fragment_columns(
+        ax,
+        fragment_ids,
+        fragment_geo_pos,
+        fragment_times,
+        annotation_fontsize=max(12.0, style["annotation_fontsize"] * 1.5),
+    )
+
+    for info in frags.values():
+        ax.axvline(
+            info["lon"],
+            color="red",
+            linestyle="--",
+            linewidth=0.8,
+            zorder=8,
+        )
+
+    handles, labels = ax.get_legend_handles_labels()
+    handles.append(Line2D([0], [0], color="red", linestyle="--", linewidth=0.8))
+    labels.append("Ground recovered fragment")
+    ax.legend(handles=handles, labels=labels, frameon=False, loc="lower left", fontsize=style["legend_fontsize"])
+    ax.tick_params(labelsize=style["tick_label_fontsize"])
+    ax.set_xlabel("Longitude (deg)", fontsize=style["axis_label_fontsize"])
+    ax.set_ylabel("Altitude (km)", fontsize=style["axis_label_fontsize"])
+    if title is not None:
+        ax.set_title(title, fontsize=style["title_fontsize"])
+    ax.grid(True, linestyle="--", linewidth=0.5)
+    ax.set_ylim(bottom=0.0)
+    return ax
+
+
+def plot_radar_lon_alt_panel(ax, title=None, font_scale=1.0):
+    style = publication_panel_style(font_scale=font_scale)
+    _, _, fragment_ids, fragment_pos, fragment_pos_err, fragment_geo_pos, fragment_times = _panel_fragment_data()
+    rlat, rlon, ralt, rsnr, rtime, bragg_enu, rdop, txid, rxid = _panel_radar_data()
+
+    _plot_optical_measurements(
+        ax,
+        fragment_ids,
+        fragment_geo_pos,
+        fragment_pos_err,
+        optical_color_mode="gray",
+        show_ids=False,
+        annotation_fontsize=style["annotation_fontsize"],
+    )
+
+    for i in range(len(rlat)):
+        idx = n.where(rsnr[i] > -10)[0]
+        if len(idx) > 0:
+            ax.plot(
+                rlon[i][idx],
+                ralt[i][idx] / 1e3,
+                ".",
+                color=f"C{i % 10}",
+                ms=5,
+                zorder=999,
+                label=f"{txid[i]}-{rxid[i]}",
+            )
+
+    ax.legend(frameon=False, loc="lower left", fontsize=style["legend_fontsize"])
+    ax.tick_params(labelsize=style["tick_label_fontsize"])
+    ax.set_xlabel("Longitude (deg)", fontsize=style["axis_label_fontsize"])
+    ax.set_ylabel("Altitude (km)", fontsize=style["axis_label_fontsize"])
+    if title is not None:
+        ax.set_title(title, fontsize=style["title_fontsize"])
+    ax.grid(True, linestyle="--", linewidth=0.5)
+    ax.set_xlim([3, 17.5])
+    ax.set_ylim(bottom=0.0)
+    return ax
+
+
+def _load_fit_overlay_data(field_name, positive_only=False):
+    import h5py
+    import matplotlib.colors as mcolors
+    from pathlib import Path
+
+    ballistic_fit_files = sorted(Path(__file__).parent.glob("ballistic_fit_sharedstart*.h5"))
+
+    def load_segment(group):
+        order = np.argsort(group["times_model"][()])
+        return {
+            "times_model": group["times_model"][()][order],
+            "lon_deg": group["lon_deg"][()][order],
+            "hgt_m": group["hgt_m"][()][order],
+            field_name: group[field_name][()][order],
+        }
+
+    def load_fit_result(path):
+        with h5py.File(path, "r") as h5:
+            result = {
+                "label": Path(path).stem,
+                "model": load_segment(h5["model"]),
+                "impact": None,
+            }
+            if "impact" in h5 and "trajectory" in h5["impact"]:
+                result["impact"] = {"trajectory": load_segment(h5["impact/trajectory"])}
+        return result
+
+    fit_results = [load_fit_result(path) for path in ballistic_fit_files]
+    if len(fit_results) == 0:
+        raise FileNotFoundError("No ballistic_fit_sharedstart*.h5 files were found.")
+
+    valid_values = []
+    for result in fit_results:
+        for segment in [result["model"]] + ([result["impact"]["trajectory"]] if result["impact"] is not None else []):
+            values = np.asarray(segment[field_name], dtype=float)
+            mask = np.isfinite(values)
+            if positive_only:
+                mask &= values > 0.0
+            if np.any(mask):
+                valid_values.append(values[mask])
+
+    if len(valid_values) == 0:
+        raise ValueError(f"No valid values were found for {field_name} in the ballistic fits.")
+
+    all_values = np.concatenate(valid_values)
+    return fit_results, float(np.nanmin(all_values)), float(np.nanmax(all_values))
+
+
+def plot_fit_overlay_lon_alt_panel(
+    ax,
+    field_name,
+    colorbar_label,
+    cmap_name,
+    log_color=False,
+    positive_only=False,
+    title=None,
+    font_scale=1.0,
+    add_colorbar=True,
+):
+    import matplotlib.colors as mcolors
+    from matplotlib.collections import LineCollection
+    from matplotlib.lines import Line2D
+
+    style = publication_panel_style(font_scale=font_scale)
+    _, _, fragment_ids, fragment_pos, fragment_pos_err, fragment_geo_pos, fragment_times = _panel_fragment_data()
+    fit_results, vmin, vmax = _load_fit_overlay_data(field_name, positive_only=positive_only)
+
+    norm = mcolors.LogNorm(vmin=vmin, vmax=vmax) if log_color else mcolors.Normalize(vmin=vmin, vmax=vmax)
+    cmap = plt.get_cmap(cmap_name)
+
+    def add_colored_trajectory(segment, linewidth, alpha, linestyle="solid", zorder=35):
+        lon = np.asarray(segment["lon_deg"], dtype=float)
+        hgt_km = np.asarray(segment["hgt_m"], dtype=float) / 1e3
+        values = np.asarray(segment[field_name], dtype=float)
+        mask = np.isfinite(lon) & np.isfinite(hgt_km)
+        if np.count_nonzero(mask) < 2:
+            return None
+
+        lon = lon[mask]
+        hgt_km = hgt_km[mask]
+        values = values[mask]
+
+        if positive_only:
+            values = np.where(np.isfinite(values) & (values > 0.0), values, float(norm.vmin))
+        else:
+            finite = np.isfinite(values)
+            if not np.any(finite):
+                return None
+            fill_value = float(np.nanmin(values[finite]))
+            values = np.where(finite, values, fill_value)
+
+        points = np.column_stack((lon, hgt_km))
+        segments = np.stack((points[:-1], points[1:]), axis=1)
+        seg_values = np.sqrt(values[:-1] * values[1:]) if log_color else 0.5 * (values[:-1] + values[1:])
+        lc = LineCollection(
+            segments,
+            cmap=cmap,
+            norm=norm,
+            linewidths=linewidth,
+            alpha=alpha,
+            linestyles=linestyle,
+            zorder=zorder,
+        )
+        lc.set_array(seg_values)
+        ax.add_collection(lc)
+        return lc
+
+    def add_outline_trajectory(segment):
+        lon = np.asarray(segment["lon_deg"], dtype=float)
+        hgt_km = np.asarray(segment["hgt_m"], dtype=float) / 1e3
+        mask = np.isfinite(lon) & np.isfinite(hgt_km)
+        if np.count_nonzero(mask) < 2:
+            return None
+        return ax.plot(
+            lon[mask],
+            hgt_km[mask],
+            color="black",
+            linewidth=0.7,
+            alpha=0.9,
+            linestyle="dashed",
+            zorder=38,
+        )[0]
+
+    _plot_optical_measurements(
+        ax,
+        fragment_ids,
+        fragment_geo_pos,
+        fragment_pos_err,
+        optical_color_mode="gray",
+        show_ids=False,
+        annotation_fontsize=style["annotation_fontsize"],
+    )
+
+    for info in frags.values():
+        ax.axvline(
+            info["lon"],
+            color="red",
+            linestyle="--",
+            alpha=0.2,
+            linewidth=0.8,
+            zorder=-8,
+        )
+
+    color_handle = None
+    for result in fit_results:
+        handle = add_colored_trajectory(result["model"], linewidth=2.4, alpha=0.95, linestyle="solid", zorder=36)
+        if color_handle is None and handle is not None:
+            color_handle = handle
+        if result["impact"] is not None:
+            impact_handle = add_colored_trajectory(
+                result["impact"]["trajectory"],
+                linewidth=2.0,
+                alpha=0.9,
+                linestyle="dashed",
+                zorder=37,
+            )
+            if color_handle is None and impact_handle is not None:
+                color_handle = impact_handle
+            add_outline_trajectory(result["impact"]["trajectory"])
+
+    if add_colorbar and color_handle is not None:
+        cbar = ax.figure.colorbar(color_handle, ax=ax, pad=0.02)
+        cbar.set_label(colorbar_label, fontsize=style["colorbar_label_fontsize"])
+        cbar.ax.tick_params(labelsize=style["tick_label_fontsize"])
+
+    legend_handles = [
+        Line2D([], [], linestyle="None", marker=".", color="gray", markersize=6, label="Optical detection"),
+        Line2D([], [], color="black", linewidth=2.2, label="Ballistic fit"),
+        Line2D([], [], color="black", linestyle="--", linewidth=1.2, label="Extrapolated trajectory"),
+        Line2D([], [], color="red", linestyle="--", linewidth=0.8, label="Ground recovered fragment"),
+    ]
+    ax.legend(handles=legend_handles, frameon=False, loc="lower left", fontsize=style["legend_fontsize"])
+    ax.tick_params(labelsize=style["tick_label_fontsize"])
+    ax.set_xlabel("Longitude (deg)", fontsize=style["axis_label_fontsize"])
+    ax.set_ylabel("Altitude (km)", fontsize=style["axis_label_fontsize"])
+    if title is not None:
+        ax.set_title(title, fontsize=style["title_fontsize"])
+    ax.grid(True, linestyle="--", linewidth=0.5)
+    ax.set_xlim([-2.5, 20.5])
+    ax.set_ylim(bottom=0.0)
+    return ax
+
+
+def plot_fit_energy_lon_alt_panel(ax, title=None, font_scale=1.0, add_colorbar=True):
+    return plot_fit_overlay_lon_alt_panel(
+        ax,
+        field_name="specific_energy_loss_rate_w_kg",
+        colorbar_label=r"Specific kinetic energy loss rate (W kg$^{-1}$)",
+        cmap_name="inferno",
+        log_color=True,
+        positive_only=True,
+        title=title,
+        font_scale=font_scale,
+        add_colorbar=add_colorbar,
+    )
+
+
+def plot_fit_relative_speed_lon_alt_panel(ax, title=None, font_scale=1.0, add_colorbar=True):
+    return plot_fit_overlay_lon_alt_panel(
+        ax,
+        field_name="relative_speed_m_s",
+        colorbar_label=r"Velocity relative to atmosphere (m s$^{-1}$)",
+        cmap_name="viridis",
+        log_color=False,
+        positive_only=False,
+        title=title,
+        font_scale=font_scale,
+        add_colorbar=add_colorbar,
+    )
+
 frags={
     "O1": {
         "place": "Komorniki, PL",
@@ -929,7 +1429,11 @@ def fit_overlay_velocity_plot():
         positive_only=False,
     )
 
-fit_overlay_plot()
-fit_overlay_velocity_plot()
 
-#radar_plot()
+def main():
+    fit_overlay_plot()
+    fit_overlay_velocity_plot()
+
+
+if __name__ == "__main__":
+    main()
