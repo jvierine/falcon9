@@ -11,14 +11,14 @@ import plot_deco
 
 
 DEFAULT_PANEL_RANGE_LIMITS_KM = [
-    (200.0, 400.0),  # a
-    (400.0, 600.0),  # b
+    (240.0, 400.0),  # a
+    (440.0, 560.0),  # b
     (250.0, 500.0),  # c
-    (300.0, 500.0),  # d
-    (400.0, 550.0),  # e
-    (150.0, 400.0),  # f
-    (200.0, 400.0),  # g
-    (200.0, 400.0),  # h
+    (320.0, 480.0),  # d
+    (420.0, 510.0),  # e
+    (200.0, 360.0),  # f
+    (260.0, 360.0),  # g
+    (210.0, 360.0),  # h
 ]
 
 
@@ -104,7 +104,7 @@ def plot_all_links(
     if len(panel_ranges_km) != len(links):
         raise ValueError("panel_ranges_km must have one (ymin, ymax) tuple per link.")
 
-    global_vmin = 3.0
+    global_vmin = -10.0
     global_vmax = None
     for (tx, rx), (panel_ymin, panel_ymax) in zip(links, panel_ranges_km):
         decoded = plot_deco.compute_rcs_grid(tx=tx, rx=rx)
@@ -149,11 +149,12 @@ def plot_all_links(
         fig, axes = plt.subplots(
             4,
             2,
-            figsize=(7.1, 10.0),
+            figsize=(7.1, 6.0),
             sharex=True,
             sharey=False,
             constrained_layout=True,
         )
+        fig.supylabel("Propagation range (km)")
 
         mesh = None
         for idx, (((tx, rx), (panel_ymin, panel_ymax)), ax) in enumerate(zip(zip(links, panel_ranges_km), axes.flat)):
@@ -193,10 +194,9 @@ def plot_all_links(
             for col_idx in range(2):
                 ax = axes[row_idx, col_idx]
                 is_bottom = row_idx == 3
-                is_left = col_idx == 0
                 ax.set_xlabel("" if not is_bottom else "Time (UTC)")
-                ax.set_ylabel("" if not is_left else "Propagation range (km)")
-                ax.tick_params(labelbottom=is_bottom, labelleft=is_left)
+                ax.set_ylabel("")
+                ax.tick_params(labelbottom=is_bottom, labelleft=True)
                 ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=5))
                 if is_bottom:
                     ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=3, maxticks=5))

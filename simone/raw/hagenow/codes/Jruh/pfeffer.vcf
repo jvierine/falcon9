@@ -1,0 +1,13 @@
+BEGIN:VCARD
+VERSION:4.0
+N:Pfeffer;Nico;;;
+FN:M.Eng. Nico Pfeffer
+EMAIL;PREF=1;TYPE=work:pfeffer@iap-kborn.de
+URL;TYPE=work:https://www.iap-kborn.de
+ADR;TYPE=work:;;Schlossstr. 6;Kühlungsborn;Mecklenburg-Vorpommern;18225;De
+ utschland
+TEL;TYPE=work;VALUE=TEXT:+49 38293 / 68 246
+TITLE:Ingenieur für Informations- und Elektrotechnik
+ROLE:Entwicklung und Projektierung
+ORG:Leibniz-Institut für Atmosphärenphysik;Radar Remote Sesning
+END:VCARD

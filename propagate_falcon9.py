@@ -246,7 +246,7 @@ def fit_drag_model(t_this,x_this,y_this,z_this,pos0,vel0,fname="fit.png"):
     
     
     
-def fit_observed_trajectory(max_duration=60):
+def fit_observed_trajectory(max_duration=20):
     hgt_count,hgt_count_all,fragment_ids,fragment_pos,fragment_pos_err,fragment_geo_pos,fragment_times=plot_fragments.get_fragments()
 
     # go through all fragments

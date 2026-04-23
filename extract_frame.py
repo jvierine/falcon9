@@ -27,8 +27,8 @@ def save_first_25_average(video_path):
     # Average frames
     avg_frame = np.mean(frames, axis=0).astype(np.uint8)
     # high pass filter image
-    kernel = n.zeros([50,50])
-    kernel[:,:]=1.0/(50*50)#100.0
+    kernel = n.zeros([100,100])
+    kernel[:,:]=1.0/(100*100)#100.0
     low=n.array(cv2.filter2D(avg_frame,-1,kernel),dtype=n.float32)
     avg_frame=n.array(avg_frame,dtype=n.float32)-low
     avg_frame=255.0*(avg_frame-n.min(avg_frame))/(n.max(avg_frame)-n.min(avg_frame))

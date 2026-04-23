@@ -4,6 +4,7 @@ import matplotlib.colors as mcolors
 import scipy.interpolate as sint
 import scipy.optimize as so
 import importlib.util
+from datetime import datetime, timezone
 from pathlib import Path
 from pymsis import msis
 
@@ -41,13 +42,13 @@ def _sanitize_filename_token(value):
     return "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in token)
 
 
-def build_fit_result_hdf5_path(fit_ids):
+def build_fit_result_hdf5_path(fit_ids, filename_prefix="ballistic_fit"):
     fit_ids = list(fit_ids)
     if len(fit_ids) == 0:
         ids_part = "none"
     else:
         ids_part = "_".join(_sanitize_filename_token(fid) for fid in fit_ids)
-    return Path(__file__).with_name(f"ballistic_fit_{ids_part}.h5")
+    return Path(__file__).with_name(f"{filename_prefix}_{ids_part}.h5")
 
 
 def _write_hdf5_item(group, key, value, path, skipped):
@@ -117,10 +118,10 @@ def _write_hdf5_item(group, key, value, path, skipped):
     skipped.append(path)
 
 
-def save_result_to_hdf5(result, fit_ids):
+def save_result_to_hdf5(result, fit_ids, filename_prefix="ballistic_fit"):
     import h5py
 
-    out_path = build_fit_result_hdf5_path(fit_ids)
+    out_path = build_fit_result_hdf5_path(fit_ids, filename_prefix=filename_prefix)
     skipped = []
     string_dtype = h5py.string_dtype(encoding="utf-8")
     print(out_path)
@@ -141,6 +142,101 @@ def save_result_to_hdf5(result, fit_ids):
             )
 
     return out_path
+
+
+def _decode_hdf5_string_dataset(dataset):
+    values = dataset[()]
+    if isinstance(values, bytes):
+        return values.decode("utf-8")
+    if isinstance(values, str):
+        return values
+    values = n.asarray(values)
+    if values.ndim == 0:
+        item = values.item()
+        if isinstance(item, bytes):
+            return item.decode("utf-8")
+        return str(item)
+    decoded = []
+    for item in values.tolist():
+        if isinstance(item, bytes):
+            decoded.append(item.decode("utf-8"))
+        else:
+            decoded.append(str(item))
+    return tuple(decoded)
+
+
+def load_fit_initial_guess_from_hdf5(hdf5_path):
+    import h5py
+
+    hdf5_path = Path(hdf5_path)
+    with h5py.File(hdf5_path, "r") as h5:
+        fit_ids = None
+        if "fit_ids" in h5:
+            fit_ids = _decode_hdf5_string_dataset(h5["fit_ids"])
+
+        return {
+            "hdf5_path": str(hdf5_path),
+            "fit_ids": fit_ids,
+            "p0_hat_eci": n.asarray(h5["p0_hat_eci"][()], dtype=float),
+            "v0_hat_eci": n.asarray(h5["v0_hat_eci"][()], dtype=float),
+            "B0_hat": n.asarray(h5["B0_hat"][()], dtype=float),
+        }
+
+
+def prepare_fragment_fit_data(
+    fragment_pos,
+    fragment_pos_err,
+    fragment_times,
+    fit_ids,
+):
+    t = n.asarray(fragment_times, dtype=float).reshape(-1)
+    pos_ecef = n.asarray(fragment_pos, dtype=float)
+    pos_ecef_err = n.asarray(fragment_pos_err, dtype=float).reshape(-1)
+
+    if pos_ecef.ndim != 2 or pos_ecef.shape[1] != 3:
+        raise ValueError("fragment_pos must have shape (n, 3)")
+    if t.shape[0] != pos_ecef.shape[0]:
+        raise ValueError("fragment_times and fragment_pos must have the same length")
+    if pos_ecef_err.shape[0] != pos_ecef.shape[0]:
+        raise ValueError("fragment_pos_err and fragment_pos must have the same length")
+    if t.size < 3:
+        raise ValueError("Need at least three 3D measurements for the fit.")
+
+    order = n.argsort(t, kind="mergesort")
+    t = t[order]
+    pos_ecef = pos_ecef[order, :]
+    pos_ecef_err = pos_ecef_err[order]
+
+    p0_guess_ecef = pos_ecef[0, :]
+    dt_obs = t[-1] - t[0]
+    if dt_obs <= 0.0:
+        raise ValueError("Need observations spanning a non-zero time interval.")
+    v0_guess_ecef = (pos_ecef[-1, :] - pos_ecef[0, :]) / dt_obs
+
+    pos_eci = ecef_to_eci_position(pos_ecef, t)
+    density_profile = build_msis_density_profile(t, pos_ecef)
+    p0_guess_eci, v0_guess_eci = ecef_to_eci_state(
+        p0_guess_ecef,
+        v0_guess_ecef,
+        t[0],
+    )
+
+    fit_ids = tuple(str(fid) for fid in fit_ids)
+    shared_start_id = fit_ids[-1] if len(fit_ids) > 0 else None
+
+    return {
+        "times_unix": t,
+        "pos_ecef": pos_ecef,
+        "pos_ecef_err": pos_ecef_err,
+        "pos_eci": pos_eci,
+        "fit_ids": fit_ids,
+        "shared_start_id": shared_start_id,
+        "p0_guess_ecef": p0_guess_ecef,
+        "v0_guess_ecef": v0_guess_ecef,
+        "p0_guess_eci": p0_guess_eci,
+        "v0_guess_eci": v0_guess_eci,
+        "density_profile": density_profile,
+    }
 
 def get_msis_density(times_unix, lat_deg, lon_deg, alt_m):
     """
@@ -406,6 +502,245 @@ def atmosphere_velocity_eci(pos_eci, omega=OMEGA_EARTH):
     return n.cross(omega_vec, pos_eci)
 
 
+def build_era5_request_area(pos_ecef, pad_deg=2.0):
+    lat_rad, lon_rad, _ = ecef_to_geodetic_wgs84(pos_ecef)
+    lat_deg = n.rad2deg(n.asarray(lat_rad, dtype=float))
+    lon_deg = n.rad2deg(n.asarray(lon_rad, dtype=float))
+    lon_deg = ((lon_deg + 180.0) % 360.0) - 180.0
+
+    north = float(min(90.0, n.nanmax(lat_deg) + pad_deg))
+    south = float(max(-90.0, n.nanmin(lat_deg) - pad_deg))
+    west = float(max(-180.0, n.nanmin(lon_deg) - pad_deg))
+    east = float(min(180.0, n.nanmax(lon_deg) + pad_deg))
+    return [north, west, south, east]
+
+
+def load_reanalysis_wind_model(
+    times_unix,
+    pos_ecef,
+    max_time_ahead=3600.0,
+    area_pad_deg=2.0,
+    verbose=0,
+):
+    info = {
+        "type": "corotating_fallback",
+        "area": None,
+        "start_time_unix": float(n.min(times_unix)),
+        "end_time_unix": float(n.max(times_unix)),
+    }
+
+    try:
+        from era5wind import load_or_download_era5, load_or_download_era5_model_levels
+    except Exception as exc:
+        info["error"] = f"Could not import era5wind: {exc}"
+        if verbose > 0:
+            print("era5wind_import_error", info["error"])
+        return None, info
+
+    area = build_era5_request_area(pos_ecef, pad_deg=area_pad_deg)
+    request_start = float(n.min(times_unix) - 3600.0)
+    request_end = float(n.max(times_unix) + max_time_ahead + 3600.0)
+    info["area"] = area
+    info["start_time_unix"] = request_start
+    info["end_time_unix"] = request_end
+
+    cache_dir = Path(__file__).with_name("data")
+    time_tag = datetime.fromtimestamp(float(n.mean(times_unix)), tz=timezone.utc).strftime("%Y%m%d_%H")
+    model_prefix = cache_dir / f"era5_model_levels_{time_tag}"
+    pressure_path = cache_dir / f"era5_pressure_levels_{time_tag}.nc"
+
+    try:
+        wind_model = load_or_download_era5_model_levels(
+            target_prefix=model_prefix,
+            start_time_unix=request_start,
+            end_time_unix=request_end,
+            area=area,
+            overwrite=False,
+        )
+        info.update(
+            {
+                "type": "era5_model_levels",
+                "cache_prefix": str(model_prefix),
+            }
+        )
+        if verbose > 0:
+            print("wind_model", info["type"], info["cache_prefix"])
+        return wind_model, info
+    except Exception as exc:
+        info["model_level_error"] = str(exc)
+        if verbose > 0:
+            print("era5_model_level_error", exc)
+
+    try:
+        wind_model = load_or_download_era5(
+            target_path=pressure_path,
+            start_time_unix=request_start,
+            end_time_unix=request_end,
+            area=area,
+            overwrite=False,
+        )
+        info.update(
+            {
+                "type": "era5_pressure_levels",
+                "cache_path": str(pressure_path),
+            }
+        )
+        if verbose > 0:
+            print("wind_model", info["type"], info["cache_path"])
+        return wind_model, info
+    except Exception as exc:
+        info["pressure_level_error"] = str(exc)
+        if verbose > 0:
+            print("era5_pressure_level_error", exc)
+
+    return None, info
+
+
+class CachedTrajectoryWindModel:
+    """
+    Atmosphere-velocity model obtained by sampling ERA5 along a nominal
+    trajectory and interpolating the resulting ECI atmosphere velocity in time.
+    """
+
+    def __init__(self, times_unix, atmosphere_velocity_eci_samples, info=None):
+        times_unix = n.asarray(times_unix, dtype=float).reshape(-1)
+        atmosphere_velocity_eci_samples = n.asarray(
+            atmosphere_velocity_eci_samples,
+            dtype=float,
+        )
+
+        if times_unix.size == 0:
+            raise ValueError("Need at least one wind sample.")
+        if atmosphere_velocity_eci_samples.shape != (times_unix.size, 3):
+            raise ValueError("Wind samples must have shape (n, 3).")
+
+        order = n.argsort(times_unix, kind="mergesort")
+        self.times_unix = times_unix[order]
+        self.atmosphere_velocity_eci_samples = atmosphere_velocity_eci_samples[order, :]
+        self.info = {} if info is None else dict(info)
+        self._interp = sint.interp1d(
+            self.times_unix,
+            self.atmosphere_velocity_eci_samples,
+            axis=0,
+            kind="linear",
+            bounds_error=False,
+            fill_value=(
+                self.atmosphere_velocity_eci_samples[0, :],
+                self.atmosphere_velocity_eci_samples[-1, :],
+            ),
+            assume_sorted=True,
+        )
+
+    def atmosphere_velocity_eci(self, lat_deg, lon_deg, hgt_m, unix_time, omega=OMEGA_EARTH):
+        return n.asarray(self._interp(float(unix_time)), dtype=float)
+
+
+def build_nominal_wind_sampling_track(result, max_time_ahead=3600.0):
+    model = result["model"]
+    t_model = n.asarray(model["times_model"], dtype=float)
+    pos_model = n.asarray(model["pos_eci"], dtype=float)
+    lat_model = n.asarray(model["lat_deg"], dtype=float)
+    lon_model = n.asarray(model["lon_deg"], dtype=float)
+    hgt_model = n.asarray(model["hgt_m"], dtype=float)
+
+    t_start = float(n.max(result["times_unix"]))
+    dt_use = float(result["dt_model"])
+
+    p_start = n.asarray(model["pos_eci_interp"](t_start), dtype=float)
+    v_start = n.asarray(model["vel_eci_interp"](t_start), dtype=float)
+    B_start = n.log10(float(model["B_interp"](t_start)))
+
+    extension = propagate(
+        p_start,
+        v_start,
+        n.array([t_start, t_start + float(max_time_ahead)], dtype=float),
+        B_start,
+        dt=dt_use,
+        fixed_B=B_start,
+        start_time=t_start,
+        stop_at_ground=True,
+        density_profile=model.get("density_profile"),
+        wind_model=model.get("wind_model"),
+    )
+
+    t_extension = n.asarray(extension["times_model"], dtype=float)
+    pos_extension = n.asarray(extension["pos_eci"], dtype=float)
+    lat_extension = n.asarray(extension["lat_deg"], dtype=float)
+    lon_extension = n.asarray(extension["lon_deg"], dtype=float)
+    hgt_extension = n.asarray(extension["hgt_m"], dtype=float)
+
+    if t_extension.size > 0:
+        t_track = n.concatenate((t_model, t_extension[1:]))
+        pos_track = n.vstack((pos_model, pos_extension[1:, :]))
+        lat_track = n.concatenate((lat_model, lat_extension[1:]))
+        lon_track = n.concatenate((lon_model, lon_extension[1:]))
+        hgt_track = n.concatenate((hgt_model, hgt_extension[1:]))
+    else:
+        t_track = t_model
+        pos_track = pos_model
+        lat_track = lat_model
+        lon_track = lon_model
+        hgt_track = hgt_model
+
+    return {
+        "times_unix": t_track,
+        "pos_eci": pos_track,
+        "lat_deg": lat_track,
+        "lon_deg": lon_track,
+        "hgt_m": hgt_track,
+        "ground_reached": bool(n.any(hgt_track <= 0.0)),
+    }
+
+
+def build_cached_era5_wind_model_from_result(result, max_time_ahead=3600.0, verbose=0):
+    track = build_nominal_wind_sampling_track(result, max_time_ahead=max_time_ahead)
+    pos_ecef = eci_to_ecef_position(track["pos_eci"], track["times_unix"])
+    source_wind_model, source_info = load_reanalysis_wind_model(
+        track["times_unix"],
+        pos_ecef,
+        max_time_ahead=0.0,
+        verbose=verbose,
+    )
+
+    info = {
+        "type": "corotating_fallback",
+        "sample_count": int(track["times_unix"].size),
+        "time_start_unix": float(track["times_unix"][0]),
+        "time_end_unix": float(track["times_unix"][-1]),
+        "ground_reached_in_profile": bool(track["ground_reached"]),
+        "source": source_info,
+    }
+
+    if source_wind_model is None:
+        return None, info
+
+    atmosphere_velocity_samples = n.empty((track["times_unix"].size, 3), dtype=float)
+    for i, tnow in enumerate(track["times_unix"]):
+        try:
+            sample = n.asarray(
+                source_wind_model.atmosphere_velocity_eci(
+                    track["lat_deg"][i],
+                    track["lon_deg"][i],
+                    max(float(track["hgt_m"][i]), 0.0),
+                    float(tnow),
+                ),
+                dtype=float,
+            )
+            if sample.shape != (3,) or not n.all(n.isfinite(sample)):
+                raise ValueError("Non-finite ERA5 atmosphere velocity sample.")
+            atmosphere_velocity_samples[i, :] = sample
+        except Exception:
+            atmosphere_velocity_samples[i, :] = atmosphere_velocity_eci(track["pos_eci"][i, :])
+
+    info["type"] = "era5_time_profile_interp"
+    cached_model = CachedTrajectoryWindModel(
+        track["times_unix"],
+        atmosphere_velocity_samples,
+        info=info,
+    )
+    return cached_model, info
+
+
 def sigmoid(x):
     return 1.0 / (1.0 + n.exp(-x))
 
@@ -460,13 +795,28 @@ def state_to_geodetic_density(pos_eci, unix_time, density_profile=None):
     return float(lat), float(lon), float(hgt), float(rho_a)
 
 
-def drag_state_eci(pos_eci, vel_eci, unix_time, B_now, density_profile=None):
+def drag_state_eci(pos_eci, vel_eci, unix_time, B_now, density_profile=None, wind_model=None):
     """
     Evaluate local atmospheric state, drag acceleration, and specific drag
     power at a single ECI state.
     """
     lat, lon, hgt, rho_a = state_to_geodetic_density(pos_eci, unix_time, density_profile=density_profile)
-    v_rel = vel_eci - atmosphere_velocity_eci(pos_eci)
+    if wind_model is None:
+        atmosphere_vel_eci = atmosphere_velocity_eci(pos_eci)
+    else:
+        try:
+            atmosphere_vel_eci = wind_model.atmosphere_velocity_eci(
+                lat,
+                lon,
+                max(float(hgt), 0.0),
+                unix_time,
+            )
+        except Exception:
+            atmosphere_vel_eci = atmosphere_velocity_eci(pos_eci)
+    atmosphere_vel_eci = n.asarray(atmosphere_vel_eci, dtype=float)
+    if atmosphere_vel_eci.shape != (3,) or not n.all(n.isfinite(atmosphere_vel_eci)):
+        atmosphere_vel_eci = atmosphere_velocity_eci(pos_eci)
+    v_rel = vel_eci - atmosphere_vel_eci
     vmag_rel = n.linalg.norm(v_rel)
 
     if vmag_rel > 0.0:
@@ -548,77 +898,167 @@ def plot_sparse_errorbars(ax, x, y, yerr, max_points=24, **kwargs):
     )
 
 
-def style_publication_axis(ax):
+def style_publication_axis(ax, tick_labelsize=11):
     ax.grid(True, linestyle="--", linewidth=0.55, alpha=0.35, color="0.55")
-    ax.tick_params(direction="out", length=4, width=0.8)
+    ax.tick_params(direction="out", length=4, width=0.8, labelsize=tick_labelsize)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.9)
 
 
-def load_fragment_geo_pos_for_plot():
+def load_fragment_plot_context():
     try:
         import plot_fragments as pf
     except Exception:
-        return None
+        return None, None
 
     try:
-        _, _, _, _, _, fragment_geo_pos, _ = pf.get_fragments()
+        _, _, _, _, _, fragment_geo_pos, fragment_times = pf.get_fragments()
     except Exception:
-        return None
+        return None, None
 
-    return fragment_geo_pos
+    return fragment_geo_pos, fragment_times
 
 
-def plot_measurement_context_lon_alt(ax, fig, result, t0):
-    t_meas = n.asarray(result["times_unix"], dtype=float)
-    lat_meas, lon_meas, hgt_meas = eci_to_geodetic(result["pos_eci"], t_meas)
-    context_geo = load_fragment_geo_pos_for_plot()
+def get_fragment_plot_context(result):
+    context_geo = result.get("plot_context_fragment_geo_pos")
+    context_times = result.get("plot_context_fragment_times")
+    if context_geo is None or context_times is None:
+        loaded_geo, loaded_times = load_fragment_plot_context()
+        if context_geo is None:
+            context_geo = loaded_geo
+        if context_times is None:
+            context_times = loaded_times
+    return context_geo, context_times
+
+
+def plot_all_fragment_background(
+    ax,
+    context_geo,
+    context_times=None,
+    t0=None,
+    panel="lonalt",
+    B_interp=None,
+):
+    if context_geo is None:
+        return
 
     background_labeled = False
-    if context_geo is not None:
-        for geo in context_geo:
-            geo = n.asarray(geo, dtype=float)
-            if geo.size == 0:
+    for i, geo in enumerate(context_geo):
+        geo = n.asarray(geo, dtype=float)
+        if geo.size == 0:
+            continue
+
+        label = "All fragment measurements" if not background_labeled else None
+
+        if panel == "map":
+            x = geo[:, 1]
+            y = geo[:, 0]
+        elif panel == "lonalt":
+            x = geo[:, 1]
+            y = geo[:, 2] / 1e3
+        elif panel == "time":
+            if context_times is None or t0 is None or i >= len(context_times):
                 continue
-            ax.plot(
-                geo[:, 1],
-                geo[:, 2] / 1e3,
-                ".",
-                color="0.80",
-                markersize=2.5,
-                alpha=0.45,
-                zorder=1,
-                rasterized=True,
-                label="All fragment measurements" if not background_labeled else None,
+            times = n.asarray(context_times[i], dtype=float)
+            if times.size == 0:
+                continue
+            x = times - float(t0)
+            y = geo[:, 2] / 1e3
+        elif panel == "B":
+            if context_times is None or t0 is None or B_interp is None or i >= len(context_times):
+                continue
+            times = n.asarray(context_times[i], dtype=float)
+            if times.size == 0:
+                continue
+            B_values = n.asarray(B_interp(times), dtype=float)
+            mask = n.isfinite(times) & n.isfinite(B_values) & (B_values > 0.0)
+            if not n.any(mask):
+                continue
+            x = times[mask] - float(t0)
+            y = B_values[mask]
+        else:
+            raise ValueError(f"Unknown panel '{panel}'")
+
+        ax.plot(
+            x,
+            y,
+            ".",
+            color="0.82",
+            markersize=2.5,
+            alpha=0.45,
+            zorder=1,
+            rasterized=True,
+            label=label,
+        )
+        background_labeled = True
+
+
+def sample_fit_ensemble(result, n_samples=100, random_seed=0):
+    covariance = result.get("parameter_covariance")
+    if covariance is None:
+        return []
+
+    xhat = n.concatenate(
+        (
+            n.asarray(result["p0_hat_eci"], dtype=float),
+            n.asarray(result["v0_hat_eci"], dtype=float),
+            n.asarray(result["B0_hat"], dtype=float),
+        )
+    )
+    covariance = n.asarray(covariance, dtype=float)
+    if covariance.shape != (xhat.size, xhat.size):
+        return []
+
+    covariance = 0.5 * (covariance + covariance.T)
+    eigvals, eigvecs = n.linalg.eigh(covariance)
+    eigvals = n.maximum(eigvals, 0.0)
+    positive = eigvals > 0.0
+    if not n.any(positive):
+        return []
+
+    transform = eigvecs[:, positive] @ n.diag(n.sqrt(eigvals[positive]))
+    rng = n.random.default_rng(random_seed)
+    t = n.asarray(result["times_unix"], dtype=float)
+    dt_model = float(result["dt_model"])
+    density_profile = result["model"].get("density_profile")
+    wind_model = result["model"].get("wind_model")
+
+    samples = []
+    max_attempts = max(5 * int(n_samples), 200)
+    for _ in range(max_attempts):
+        trial_x = xhat + transform @ rng.standard_normal(transform.shape[1])
+        try:
+            trial_model = build_model_from_parameters(
+                trial_x,
+                t,
+                dt_model,
+                density_profile=density_profile,
+                wind_model=wind_model,
             )
-            background_labeled = True
+        except Exception:
+            continue
 
-    time_rel = t_meas - float(t0)
-    sc = ax.scatter(
-        lon_meas,
-        hgt_meas / 1e3,
-        c=time_rel,
-        cmap="viridis",
-        s=26,
-        linewidths=0,
-        alpha=0.95,
-        zorder=4,
-        rasterized=True,
-        label="Merged measurements",
-    )
-    ax.plot(
-        lon_meas,
-        hgt_meas / 1e3,
-        color="0.20",
-        linewidth=1.0,
-        alpha=0.70,
-        zorder=3,
-    )
-    cbar = fig.colorbar(sc, ax=ax, pad=0.01, fraction=0.055)
-    cbar.set_label("Time since first measurement (s)")
+        trial_sample = {"model": trial_model, "impact": None}
+        if result.get("impact") is not None:
+            try:
+                trial_sample["impact"] = extrapolate_best_fit_to_ground(
+                    {
+                        "model": trial_model,
+                        "times_unix": t,
+                        "dt_model": dt_model,
+                    }
+                )
+            except Exception:
+                trial_sample["impact"] = None
 
-    return lon_meas, hgt_meas / 1e3
+        samples.append(trial_sample)
+        if len(samples) >= int(n_samples):
+            break
+
+    return samples
 
 
-def plot_ballistic_fit(result):
+def plot_ballistic_fit(result, show=True):
     t_meas = n.asarray(result["times_unix"], dtype=float)
     t0 = n.min(t_meas)
 
@@ -633,11 +1073,12 @@ def plot_ballistic_fit(result):
     B_model = model["B_model"][order]
     impact = result.get("impact")
     impact_uncertainty = result.get("impact_uncertainty")
-    B_model_std = ballistic_coefficient_uncertainty(result, t_model, B_values=B_model)
+    context_geo, context_times = get_fragment_plot_context(result)
+    fit_samples = sample_fit_ensemble(result, n_samples=100, random_seed=0)
 
     fig, axes = plt.subplot_mosaic(
         [["map", "time"], ["B", "lonalt"]],
-        figsize=(11.5, 8.4),
+        figsize=(12.0, 8.8),
         constrained_layout=True,
     )
 
@@ -646,21 +1087,83 @@ def plot_ballistic_fit(result):
     ax_B = axes["B"]
     ax_lonalt = axes["lonalt"]
 
-    model_color = "tab:blue"
-    extrap_color = "tab:orange"
-    measurement_color = "0.15"
+    sample_color = "#fcae91"
+    model_color = "#cb181d"
+    measurement_color = "0.45"
+    axis_label_fontsize = 16
+    tick_label_fontsize = 14
+    B_tick_label_fontsize = 14
+    legend_fontsize = 13
+    annotation_fontsize = 10.5
+    best_fit_zorder = 14
+    extrapolated_zorder = 15
+    measurement_zorder = 9
 
-    ax_map.plot(lon_model, lat_model, "-", lw=2.2, color=model_color, label="Best-fit trajectory")
+    for ax in (ax_map, ax_time, ax_B, ax_lonalt):
+        ax.set_facecolor("white")
+
+    plot_all_fragment_background(ax_map, context_geo, panel="map")
+    plot_all_fragment_background(ax_time, context_geo, context_times=context_times, t0=t0, panel="time")
+    plot_all_fragment_background(
+        ax_B,
+        context_geo,
+        context_times=context_times,
+        t0=t0,
+        panel="B",
+        B_interp=model["B_interp"],
+    )
+    plot_all_fragment_background(ax_lonalt, context_geo, panel="lonalt")
+
+    sample_label_used = False
+    for sample in fit_samples:
+        sample_model = sample["model"]
+        sample_order = n.argsort(sample_model["times_model"])
+        sample_t = n.asarray(sample_model["times_model"][sample_order], dtype=float)
+        sample_lat = n.asarray(sample_model["lat_deg"][sample_order], dtype=float)
+        sample_lon = n.asarray(sample_model["lon_deg"][sample_order], dtype=float)
+        sample_hgt = n.asarray(sample_model["hgt_m"][sample_order], dtype=float) / 1e3
+        sample_B = n.asarray(sample_model["B_model"][sample_order], dtype=float)
+
+        sample_label = "Uncertainty samples" if not sample_label_used else None
+        ax_map.plot(sample_lon, sample_lat, "-", lw=0.95, color=sample_color, alpha=0.42, zorder=4, label=sample_label)
+        ax_time.plot(sample_t - t0, sample_hgt, "-", lw=0.95, color=sample_color, alpha=0.42, zorder=4, label=sample_label)
+        ax_B.semilogy(sample_t - t0, sample_B, "-", lw=0.95, color=sample_color, alpha=0.42, zorder=4, label=sample_label)
+        ax_lonalt.plot(sample_lon, sample_hgt, "-", lw=0.95, color=sample_color, alpha=0.42, zorder=4, label=sample_label)
+        sample_label_used = True
+
+        sample_impact = sample.get("impact")
+        if sample_impact is not None:
+            sample_impact_model = sample_impact["trajectory"]
+            sample_impact_order = n.argsort(sample_impact_model["times_model"])
+            sample_ti = n.asarray(sample_impact_model["times_model"][sample_impact_order], dtype=float)
+            sample_lati = n.asarray(sample_impact_model["lat_deg"][sample_impact_order], dtype=float)
+            sample_loni = n.asarray(sample_impact_model["lon_deg"][sample_impact_order], dtype=float)
+            sample_hgti = n.asarray(sample_impact_model["hgt_m"][sample_impact_order], dtype=float) / 1e3
+            sample_Bi = n.asarray(sample_impact_model["B_model"][sample_impact_order], dtype=float)
+            ax_map.plot(sample_loni, sample_lati, "--", lw=0.85, color=sample_color, alpha=0.34, zorder=4)
+            ax_time.plot(sample_ti - t0, sample_hgti, "--", lw=0.85, color=sample_color, alpha=0.34, zorder=4)
+            ax_B.semilogy(sample_ti - t0, sample_Bi, "--", lw=0.85, color=sample_color, alpha=0.34, zorder=4)
+            ax_lonalt.plot(sample_loni, sample_hgti, "--", lw=0.85, color=sample_color, alpha=0.34, zorder=4)
+
     ax_map.plot(
+        lon_model,
+        lat_model,
+        "-",
+        lw=2.5,
+        color=model_color,
+        label="Best-fit trajectory",
+        zorder=best_fit_zorder,
+    )
+    ax_map.scatter(
         lon_meas,
         lat_meas,
-        "o",
-        ms=4.5,
+        s=24,
         color=measurement_color,
-        markeredgecolor="white",
-        markeredgewidth=0.4,
-        label="Fitted measurements",
-        zorder=8,
+        linewidths=0,
+        alpha=0.9,
+        zorder=measurement_zorder,
+        rasterized=True,
+        label="Used measurements",
     )
     for i, (frag_id, lat_frag, lon_frag) in enumerate(RECOVERED_FRAGMENTS):
         ax_map.plot(
@@ -679,72 +1182,87 @@ def plot_ballistic_fit(result):
             lon_frag + 0.02,
             lat_frag + 0.02,
             frag_id,
-            fontsize=7,
+            fontsize=annotation_fontsize,
             ha="left",
             va="bottom",
             zorder=17,
         )
-    ax_map.set_xlabel("Longitude (deg)")
-    ax_map.set_ylabel("Latitude (deg)")
-    style_publication_axis(ax_map)
+    ax_map.set_xlabel("Longitude (deg)", fontsize=axis_label_fontsize)
+    ax_map.set_ylabel("Latitude (deg)", fontsize=axis_label_fontsize)
+    style_publication_axis(ax_map, tick_labelsize=tick_label_fontsize)
 
-    ax_time.plot(t_model - t0, hgt_model / 1e3, "-", lw=2.2, color=model_color, label="Best-fit trajectory")
     ax_time.plot(
+        t_model - t0,
+        hgt_model / 1e3,
+        "-",
+        lw=2.5,
+        color=model_color,
+        label="Best-fit trajectory",
+        zorder=best_fit_zorder,
+    )
+    ax_time.scatter(
         t_meas - t0,
         hgt_meas / 1e3,
-        "o",
-        ms=4.5,
+        s=24,
         color=measurement_color,
-        markeredgecolor="white",
-        markeredgewidth=0.4,
-        label="Fitted measurements",
-        zorder=8,
+        linewidths=0,
+        alpha=0.9,
+        zorder=measurement_zorder,
+        rasterized=True,
+        label="Used measurements",
     )
-    ax_time.set_xlabel("Time since first measurement (s)")
-    ax_time.set_ylabel("Height (km)")
-    style_publication_axis(ax_time)
+    ax_time.set_xlabel("Time since first measurement (s)", fontsize=axis_label_fontsize)
+    ax_time.set_ylabel("Height (km)", fontsize=axis_label_fontsize)
+    style_publication_axis(ax_time, tick_labelsize=tick_label_fontsize)
 
-    ax_B.semilogy(t_model - t0, B_model, "-", lw=2.2, color=model_color, label="Best-fit trajectory")
-    if B_model_std is not None:
-        plot_sparse_errorbars(
-            ax_B,
-            t_model - t0,
-            B_model,
-            B_model_std,
-            ecolor="0.45",
-            elinewidth=0.9,
-            alpha=0.75,
-            capsize=0,
-            zorder=5,
-            label="B uncertainty (1$\\sigma$)",
-        )
-    ax_B.set_xlabel("Time since first measurement (s)")
-    ax_B.set_ylabel("Ballistic coefficient, $B$")
-    style_publication_axis(ax_B)
+    ax_B.semilogy(
+        t_model - t0,
+        B_model,
+        "-",
+        lw=2.5,
+        color=model_color,
+        label=r"Best-fit $B(t)$",
+        zorder=best_fit_zorder,
+    )
+    ax_B.set_xlabel("Time since first measurement (s)", fontsize=axis_label_fontsize)
+    ax_B.set_ylabel(r"$B(t)$ (m$^2$ kg$^{-1}$)", fontsize=axis_label_fontsize)
+    style_publication_axis(ax_B, tick_labelsize=B_tick_label_fontsize)
+    ax_B.tick_params(axis="both", which="major", labelsize=B_tick_label_fontsize)
+    ax_B.tick_params(axis="both", which="minor", labelsize=max(B_tick_label_fontsize - 1, 1))
 
-    plot_measurement_context_lon_alt(ax_lonalt, fig, result, t0)
     ax_lonalt.plot(
         lon_model,
         hgt_model / 1e3,
         "-",
-        lw=2.2,
+        lw=2.5,
         color=model_color,
         label="Best-fit trajectory",
-        zorder=9,
+        zorder=best_fit_zorder,
+    )
+    ax_lonalt.scatter(
+        lon_meas,
+        hgt_meas / 1e3,
+        s=24,
+        color=measurement_color,
+        linewidths=0,
+        alpha=0.9,
+        zorder=measurement_zorder,
+        rasterized=True,
+        label="Used measurements",
     )
     for i, (_, _, lon_frag) in enumerate(RECOVERED_FRAGMENTS):
         ax_lonalt.axvline(
             lon_frag,
-            color="red",
+            color="#2171b5",
             linestyle="--",
             linewidth=0.9,
             alpha=0.8,
             zorder=8,
             label="Recovered fragment longitude" if i == 0 else None,
         )
-    ax_lonalt.set_xlabel("Longitude (deg)")
-    ax_lonalt.set_ylabel("Height (km)")
-    style_publication_axis(ax_lonalt)
+    ax_lonalt.set_xlabel("Longitude (deg)", fontsize=axis_label_fontsize)
+    ax_lonalt.set_ylabel("Height (km)", fontsize=axis_label_fontsize)
+    style_publication_axis(ax_lonalt, tick_labelsize=tick_label_fontsize)
 
     if impact is not None:
         impact_model = impact["trajectory"]
@@ -754,21 +1272,14 @@ def plot_ballistic_fit(result):
         lon_impact = impact_model["lon_deg"][impact_order]
         hgt_impact = impact_model["hgt_m"][impact_order]
         B_impact = impact_model["B_model"][impact_order]
-        B_impact_std = None
-        if t_impact.size > 0:
-            B_impact_std = ballistic_coefficient_uncertainty(
-                result,
-                n.full_like(t_impact, t_impact[0], dtype=float),
-                B_values=B_impact,
-            )
-
         ax_map.plot(
             lon_impact,
             lat_impact,
             "--",
-            lw=2.0,
-            color=extrap_color,
+            lw=2.3,
+            color=model_color,
             label="Extrapolated trajectory",
+            zorder=extrapolated_zorder,
         )
         ax_map.plot(
             impact["impact_lon_deg"],
@@ -777,43 +1288,16 @@ def plot_ballistic_fit(result):
             ms=8,
             mew=2,
             label="Impact",
-            color=extrap_color,
+            color=model_color,
         )
-        if impact_uncertainty is not None:
-            theta = n.linspace(0.0, 2.0 * n.pi, 181, endpoint=True)
-            azimuth_rad = n.deg2rad(impact_uncertainty["impact_horizontal_major_axis_azimuth_deg"])
-            major_axis_m = impact_uncertainty["impact_horizontal_major_axis_1sigma_m"]
-            minor_axis_m = impact_uncertainty["impact_horizontal_minor_axis_1sigma_m"]
-            east = (
-                major_axis_m * n.sin(theta) * n.sin(azimuth_rad)
-                + minor_axis_m * n.cos(theta) * n.cos(azimuth_rad)
-            )
-            north = (
-                major_axis_m * n.sin(theta) * n.cos(azimuth_rad)
-                - minor_axis_m * n.cos(theta) * n.sin(azimuth_rad)
-            )
-            lat_scale_m_per_deg = 111320.0
-            lon_scale_m_per_deg = lat_scale_m_per_deg * max(
-                n.cos(n.deg2rad(impact["impact_lat_deg"])),
-                1e-6,
-            )
-            ellipse_lon = impact["impact_lon_deg"] + east / lon_scale_m_per_deg
-            ellipse_lat = impact["impact_lat_deg"] + north / lat_scale_m_per_deg
-            ax_map.plot(
-                ellipse_lon,
-                ellipse_lat,
-                color="0.45",
-                linewidth=1.3,
-                alpha=0.95,
-                label="Impact uncertainty (1$\\sigma$)",
-            )
         ax_time.plot(
             t_impact - t0,
             hgt_impact / 1e3,
             "--",
-            lw=2.0,
-            color=extrap_color,
+            lw=2.3,
+            color=model_color,
             label="Extrapolated trajectory",
+            zorder=extrapolated_zorder,
         )
         ax_time.plot(
             impact["impact_time_unix"] - t0,
@@ -822,36 +1306,25 @@ def plot_ballistic_fit(result):
             ms=8,
             mew=2,
             label="Impact",
-            color=extrap_color,
+            color=model_color,
         )
         ax_B.semilogy(
             t_impact - t0,
             B_impact,
             "--",
-            lw=2.0,
-            color=extrap_color,
-            label="Extrapolated trajectory",
+            lw=2.3,
+            color=model_color,
+            label=r"Extrapolated $B(t)$",
+            zorder=extrapolated_zorder,
         )
-        if B_impact_std is not None:
-            plot_sparse_errorbars(
-                ax_B,
-                t_impact - t0,
-                B_impact,
-                B_impact_std,
-                ecolor="0.6",
-                elinewidth=0.8,
-                alpha=0.65,
-                capsize=0,
-                zorder=5,
-            )
         ax_lonalt.plot(
             lon_impact,
             hgt_impact / 1e3,
             "--",
-            lw=2.0,
-            color=extrap_color,
+            lw=2.3,
+            color=model_color,
             label="Extrapolated trajectory",
-            zorder=9,
+            zorder=extrapolated_zorder,
         )
         ax_lonalt.plot(
             impact["impact_lon_deg"],
@@ -860,13 +1333,32 @@ def plot_ballistic_fit(result):
             ms=8,
             mew=2,
             label="Impact",
-            color=extrap_color,
+            color=model_color,
             zorder=10,
         )
     for ax in (ax_map, ax_time, ax_B, ax_lonalt):
-        ax.legend(frameon=True, framealpha=0.95, facecolor="white", edgecolor="0.85")
+        ax.legend(
+            frameon=True,
+            framealpha=0.95,
+            facecolor="white",
+            edgecolor="0.85",
+            fontsize=legend_fontsize,
+        )
 
-    plt.show()
+    if "hdf5_path" in result:
+        pdf_path = Path(result["hdf5_path"]).with_suffix(".pdf")
+    elif "fit_ids" in result:
+        pdf_path = build_fit_result_hdf5_path(result["fit_ids"]).with_suffix(".pdf")
+    else:
+        pdf_path = Path(__file__).with_name("ballistic_fit_publication.pdf")
+    fig.savefig(pdf_path, bbox_inches="tight")
+    result["plot_pdf_path"] = str(pdf_path)
+    print("plot_pdf_path", pdf_path)
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return pdf_path
 
 
 def plot_density_profile(result):
@@ -1059,6 +1551,7 @@ def propagate(
     start_time=None,
     stop_at_ground=False,
     density_profile=None,
+    wind_model=None,
 ):
     """
     Simple forward propagation utility used for quick inspection/debugging.
@@ -1106,6 +1599,7 @@ def propagate(
         tnow,
         B_now,
         density_profile=density_profile,
+        wind_model=wind_model,
     )
     lat_model.append(lat)
     lon_model.append(lon)
@@ -1127,6 +1621,7 @@ def propagate(
             tnow,
             B_now,
             density_profile=density_profile,
+            wind_model=wind_model,
         )
         a_grav = gravity_accel_eci_j2(p)
         #if vmag > 0.0:
@@ -1146,6 +1641,7 @@ def propagate(
             tnow,
             B_now,
             density_profile=density_profile,
+            wind_model=wind_model,
         )
         t_model.append(tnow)
         pos_eci.append(p.copy())
@@ -1280,6 +1776,7 @@ def propagate(
         "speed_interp": speed_interp,
         "relative_speed_interp": relative_speed_interp,
         "density_profile": density_profile,
+        "wind_model": wind_model,
     }
 
 
@@ -1308,6 +1805,7 @@ def extrapolate_best_fit_to_ground(result, max_time_ahead=3600.0, dt=None):
         start_time=t_start,
         stop_at_ground=True,
         density_profile=model.get("density_profile"),
+        wind_model=model.get("wind_model"),
     )
 
     hgt_model = extrapolation["hgt_m"]
@@ -1376,22 +1874,36 @@ def extrapolate_best_fit_to_ground(result, max_time_ahead=3600.0, dt=None):
     }
 
 
-def build_model_from_parameters(x, t, dt_model, density_profile=None):
+def build_model_from_parameters(x, t, dt_model, density_profile=None, wind_model=None):
     p0 = x[0:3]
     v0 = x[3:6]
     B0 = x[6:8]
-    model = propagate(p0, v0, t, B0=B0, dt=dt_model, density_profile=density_profile)
+    model = propagate(
+        p0,
+        v0,
+        t,
+        B0=B0,
+        dt=dt_model,
+        density_profile=density_profile,
+        wind_model=wind_model,
+    )
     return model
 
 
-def residuals_lm(x, t, pos_eci, dt_model, gamma_fixed, density_profile=None):
+def residuals_lm(x, t, pos_eci, dt_model, gamma_fixed, density_profile=None, wind_model=None):
     bad = n.full(pos_eci.size, 1e9, dtype=float)
 
     if not n.all(n.isfinite(x)):
         return bad
 
     try:
-        model = build_model_from_parameters(x, t, dt_model, density_profile=density_profile)
+        model = build_model_from_parameters(
+            x,
+            t,
+            dt_model,
+            density_profile=density_profile,
+            wind_model=wind_model,
+        )
         model_pos = n.asarray(model["pos_eci_interp"](t), dtype=float)
     except Exception:
         return bad
@@ -1406,8 +1918,16 @@ def residuals_lm(x, t, pos_eci, dt_model, gamma_fixed, density_profile=None):
     return residuals.ravel()
 
 
-def objective_fmin(x, t, pos_eci, dt_model, gamma_fixed, density_profile=None):
-    residuals = residuals_lm(x, t, pos_eci, dt_model, gamma_fixed, density_profile=density_profile)
+def objective_fmin(x, t, pos_eci, dt_model, gamma_fixed, density_profile=None, wind_model=None):
+    residuals = residuals_lm(
+        x,
+        t,
+        pos_eci,
+        dt_model,
+        gamma_fixed,
+        density_profile=density_profile,
+        wind_model=wind_model,
+    )
     s = float(n.sum(residuals**2))
     # don't remove this
     print(s)
@@ -1468,6 +1988,584 @@ def estimate_parameter_covariance(jacobian, residual_vector):
     }
 
 
+def run_fmin_fit_stage(
+    x0,
+    t,
+    pos_eci,
+    dt_model,
+    gamma_fixed,
+    density_profile=None,
+    wind_model=None,
+    stage_name="fmin",
+    verbose=0,
+):
+    xopt, fopt, iterations, funcalls, warnflag = so.fmin(
+        objective_fmin,
+        x0,
+        args=(t, pos_eci, dt_model, gamma_fixed, density_profile, wind_model),
+        full_output=True,
+        maxiter=8000,
+        maxfun=10000,
+        disp=bool(verbose > 1),
+    )
+
+    residual_vector = residuals_lm(
+        xopt,
+        t,
+        pos_eci,
+        dt_model,
+        gamma_fixed,
+        density_profile=density_profile,
+        wind_model=wind_model,
+    )
+    residual_jac = finite_difference_jacobian(
+        lambda x: residuals_lm(
+            x,
+            t,
+            pos_eci,
+            dt_model,
+            gamma_fixed,
+            density_profile=density_profile,
+            wind_model=wind_model,
+        ),
+        xopt,
+        parameter_step_sizes(xopt),
+    )
+    covariance_info = estimate_parameter_covariance(residual_jac, residual_vector)
+    model = build_model_from_parameters(
+        xopt,
+        t,
+        dt_model,
+        density_profile=density_profile,
+        wind_model=wind_model,
+    )
+    optimizer = {
+        "method": "fmin",
+        "stage": str(stage_name),
+        "x": xopt,
+        "fun": float(fopt),
+        "nit": int(iterations),
+        "nfev": int(funcalls),
+        "warnflag": int(warnflag),
+        "success": bool(warnflag == 0),
+    }
+    return {
+        "xopt": n.asarray(xopt, dtype=float).copy(),
+        "optimizer": optimizer,
+        "covariance_info": covariance_info,
+        "model": model,
+        "residual_vector": residual_vector,
+    }
+
+
+def joint_shared_start_parameter_step_sizes(n_groups, n_paths):
+    group_width = 7  # shared p0(3), v0(3), log_B0
+    local_width = 1  # path-specific log_B1
+    steps = n.full(group_width * n_groups + local_width * n_paths, 1e-3, dtype=float)
+    for i in range(n_groups):
+        base = group_width * i
+        steps[base:base + 3] = 10.0
+        steps[base + 3:base + 6] = 0.1
+        steps[base + 6] = 1e-3
+    return steps
+
+
+def joint_shared_start_group_order(prepared_paths):
+    group_order = []
+    for path in prepared_paths:
+        shared_start_id = path["shared_start_id"]
+        if shared_start_id not in group_order:
+            group_order.append(shared_start_id)
+    return tuple(group_order)
+
+
+def joint_shared_start_decode_local_x(x, path_index, prepared_path, group_index, n_groups):
+    x = n.asarray(x, dtype=float)
+    group_base = 7 * group_index[prepared_path["shared_start_id"]]
+    local_base = 7 * n_groups + path_index
+    shared_state = x[group_base:group_base + 6]
+    shared_log_B0 = x[group_base + 6]
+    return n.concatenate(
+        (
+            shared_state,
+            n.array([shared_log_B0, x[local_base]], dtype=float),
+        )
+    )
+
+
+def joint_shared_start_extract_local_covariance(covariance, path_index, prepared_path, group_index, n_groups):
+    if covariance is None:
+        return None
+    group_base = 7 * group_index[prepared_path["shared_start_id"]]
+    local_base = 7 * n_groups + path_index
+    idx = list(range(group_base, group_base + 7)) + [local_base]
+    return covariance[n.ix_(idx, idx)]
+
+
+def run_joint_shared_start_fmin_stage(
+    prepared_paths,
+    shared_start_order,
+    x0,
+    dt_model,
+    gamma_fixed,
+    wind_models=None,
+    stage_name="joint_fmin",
+    verbose=0,
+):
+    n_paths = len(prepared_paths)
+    n_groups = len(shared_start_order)
+    if wind_models is None:
+        wind_models = [None] * n_paths
+    if len(wind_models) != n_paths:
+        raise ValueError("wind_models must match the number of prepared paths")
+
+    group_index = {fid: i for i, fid in enumerate(shared_start_order)}
+
+    def residuals_joint(x):
+        residuals = []
+        for i, (path, wind_model) in enumerate(zip(prepared_paths, wind_models)):
+            local_x = joint_shared_start_decode_local_x(
+                x,
+                i,
+                path,
+                group_index,
+                n_groups,
+            )
+            residuals.append(
+                residuals_lm(
+                    local_x,
+                    path["times_unix"],
+                    path["pos_eci"],
+                    dt_model,
+                    gamma_fixed,
+                    density_profile=path["density_profile"],
+                    wind_model=wind_model,
+                )
+            )
+        return n.concatenate(residuals)
+
+    def objective_joint(x):
+        residual_vector = residuals_joint(x)
+        cost = float(n.sum(residual_vector**2))
+        if verbose > 0:
+            print(cost)
+        return cost
+
+    xopt, fopt, iterations, funcalls, warnflag = so.fmin(
+        objective_joint,
+        n.asarray(x0, dtype=float),
+        full_output=True,
+        maxiter=max(8000, 3000 * n_paths),
+        maxfun=max(10000, 4000 * n_paths),
+        disp=bool(verbose > 1),
+    )
+
+    residual_vector = residuals_joint(xopt)
+    residual_jac = finite_difference_jacobian(
+        residuals_joint,
+        xopt,
+        joint_shared_start_parameter_step_sizes(n_groups, n_paths),
+    )
+    covariance_info = estimate_parameter_covariance(residual_jac, residual_vector)
+
+    models = []
+    local_xs = []
+    for i, (path, wind_model) in enumerate(zip(prepared_paths, wind_models)):
+        local_x = joint_shared_start_decode_local_x(
+            xopt,
+            i,
+            path,
+            group_index,
+            n_groups,
+        )
+        local_xs.append(local_x)
+        models.append(
+            build_model_from_parameters(
+                local_x,
+                path["times_unix"],
+                dt_model,
+                density_profile=path["density_profile"],
+                wind_model=wind_model,
+            )
+        )
+
+    optimizer = {
+        "method": "fmin_joint",
+        "stage": str(stage_name),
+        "x": n.asarray(xopt, dtype=float).copy(),
+        "fun": float(fopt),
+        "nit": int(iterations),
+        "nfev": int(funcalls),
+        "warnflag": int(warnflag),
+        "success": bool(warnflag == 0),
+    }
+    return {
+        "xopt": n.asarray(xopt, dtype=float).copy(),
+        "optimizer": optimizer,
+        "covariance_info": covariance_info,
+        "residual_vector": residual_vector,
+        "models": models,
+        "local_xs": local_xs,
+        "group_index": group_index,
+        "shared_start_order": tuple(shared_start_order),
+    }
+
+
+def build_path_result_from_stage(
+    prepared_path,
+    local_x,
+    local_covariance_info,
+    model,
+    optimizer,
+    dt_model,
+    wind_model_info,
+    optimizer_zero_wind=None,
+    optimizer_era5=None,
+    plot_context_fragment_geo_pos=None,
+    filename_prefix="ballistic_fit_sharedstart",
+    verbose=0,
+):
+    local_x = n.asarray(local_x, dtype=float)
+    p0_hat_eci = local_x[0:3]
+    v0_hat_eci = local_x[3:6]
+    B0 = local_x[6:8]
+
+    result = {
+        "times_unix": prepared_path["times_unix"],
+        "pos_ecef": prepared_path["pos_ecef"],
+        "pos_ecef_err": prepared_path["pos_ecef_err"],
+        "pos_eci": prepared_path["pos_eci"],
+        "fit_ids": prepared_path["fit_ids"],
+        "shared_start_id": prepared_path["shared_start_id"],
+        "joint_fit": True,
+        "p0_guess_ecef": prepared_path["p0_guess_ecef"],
+        "v0_guess_ecef": prepared_path["v0_guess_ecef"],
+        "p0_guess_eci": prepared_path["p0_guess_eci"],
+        "v0_guess_eci": prepared_path["v0_guess_eci"],
+        "p0_hat_eci": p0_hat_eci,
+        "v0_hat_eci": v0_hat_eci,
+        "B0_hat": B0,
+        "fit_stage": optimizer["stage"],
+        "dt_model": dt_model,
+        "optimizer": dict(optimizer),
+        "optimizer_zero_wind": None if optimizer_zero_wind is None else dict(optimizer_zero_wind),
+        "optimizer_era5": None if optimizer_era5 is None else dict(optimizer_era5),
+        "parameter_covariance": None if local_covariance_info is None else local_covariance_info["covariance"],
+        "parameter_std": None if local_covariance_info is None else local_covariance_info["std"],
+        "density_profile_altitude_m": prepared_path["density_profile"]["altitude_grid_m"],
+        "density_profile_rho_kg_m3": prepared_path["density_profile"]["rho_grid_kg_m3"],
+        "density_profile_reference_time_unix": prepared_path["density_profile"]["reference_time_unix"],
+        "density_profile_reference_lat_deg": prepared_path["density_profile"]["reference_lat_deg"],
+        "density_profile_reference_lon_deg": prepared_path["density_profile"]["reference_lon_deg"],
+        "wind_model_info": wind_model_info,
+        "specific_energy_loss_rate_w_kg": model["specific_energy_loss_rate_w_kg"],
+        "specific_energy_loss_rate_interp": model["specific_energy_loss_rate_interp"],
+        "speed_m_s": model["speed_m_s"],
+        "speed_interp": model["speed_interp"],
+        "relative_speed_m_s": model["relative_speed_m_s"],
+        "relative_speed_interp": model["relative_speed_interp"],
+        "fit_parameter_names": (
+            "p0_eci_x", "p0_eci_y", "p0_eci_z",
+            "v0_eci_x", "v0_eci_y", "v0_eci_z",
+            "log_B00", "log_B01",
+        ),
+        "model": model,
+    }
+
+    try:
+        result["impact"] = extrapolate_best_fit_to_ground(result)
+    except ValueError as exc:
+        result["impact"] = None
+        result["impact_error"] = str(exc)
+    else:
+        try:
+            result["impact_uncertainty"] = estimate_impact_uncertainty(
+                local_x,
+                local_covariance_info,
+                prepared_path["times_unix"],
+                dt_model,
+                density_profile=prepared_path["density_profile"],
+                wind_model=model.get("wind_model"),
+            )
+        except ValueError as exc:
+            result["impact_uncertainty"] = None
+            result["impact_uncertainty_error"] = str(exc)
+        except Exception as exc:
+            result["impact_uncertainty"] = None
+            result["impact_uncertainty_error"] = str(exc)
+
+    if "impact_uncertainty" not in result:
+        result["impact_uncertainty"] = None
+
+    hdf5_path = save_result_to_hdf5(
+        result,
+        prepared_path["fit_ids"],
+        filename_prefix=filename_prefix,
+    )
+    result["hdf5_path"] = str(hdf5_path)
+    if plot_context_fragment_geo_pos is not None:
+        result["plot_context_fragment_geo_pos"] = plot_context_fragment_geo_pos
+
+    if verbose > 0:
+        print("shared_start_id", prepared_path["shared_start_id"])
+        print("fit_ids", " -> ".join(prepared_path["fit_ids"]))
+        print("cost", optimizer["fun"])
+        print("success", optimizer["success"])
+        print("hdf5_path", result["hdf5_path"])
+        if result["impact"] is not None:
+            print("impact_lat_deg", result["impact"]["impact_lat_deg"])
+            print("impact_lon_deg", result["impact"]["impact_lon_deg"])
+            print("impact_time_unix", result["impact"]["impact_time_unix"])
+        plot_ballistic_fit(result, show=bool(verbose > 1))
+
+    return result
+
+
+def fit_multiple_paths_shared_start_ballistic_coefficient(
+    path_specs,
+    gamma=0.5,
+    B0_guess=[-3, -3],
+    plot_context_fragment_geo_pos=None,
+    verbose=2,
+):
+    if len(path_specs) == 0:
+        raise ValueError("path_specs must contain at least one path")
+
+    B0_guess = n.asarray(B0_guess, dtype=float).reshape(-1)
+    if B0_guess.size != 2:
+        raise ValueError("B0_guess must contain exactly two values.")
+
+    gamma_fixed = float(gamma)
+    dt_model = 2.0
+
+    prepared_paths = []
+    initial_sources = []
+    for spec in path_specs:
+        prepared_paths.append(
+            prepare_fragment_fit_data(
+                spec["fragment_pos"],
+                spec["fragment_pos_err"],
+                spec["fragment_times"],
+                spec["fit_ids"],
+            )
+        )
+        initial_hdf5_path = spec.get("initial_hdf5_path")
+        if initial_hdf5_path is None:
+            candidate_path = build_fit_result_hdf5_path(spec["fit_ids"])
+            if candidate_path.exists():
+                initial_hdf5_path = candidate_path
+
+        initial_source = None
+        if initial_hdf5_path is not None and Path(initial_hdf5_path).exists():
+            initial_source = load_fit_initial_guess_from_hdf5(initial_hdf5_path)
+        else:
+            initial_source = spec.get("initial_result")
+        initial_sources.append(initial_source)
+
+    shared_start_order = joint_shared_start_group_order(prepared_paths)
+    group_initial_p0 = {shared_start_id: [] for shared_start_id in shared_start_order}
+    group_initial_v0 = {shared_start_id: [] for shared_start_id in shared_start_order}
+    group_initial_log_B0 = {shared_start_id: [] for shared_start_id in shared_start_order}
+    group_paths = {shared_start_id: [] for shared_start_id in shared_start_order}
+    x0_parts = []
+
+    local_initials = []
+    for prepared_path, initial_source in zip(prepared_paths, initial_sources):
+        if initial_source is not None:
+            p0_init = n.asarray(initial_source["p0_hat_eci"], dtype=float).reshape(3)
+            v0_init = n.asarray(initial_source["v0_hat_eci"], dtype=float).reshape(3)
+            B_init = n.asarray(initial_source["B0_hat"], dtype=float).reshape(-1)
+            if B_init.size != 2:
+                raise ValueError("initial fit source must contain exactly two B0_hat values.")
+        else:
+            p0_init = prepared_path["p0_guess_eci"]
+            v0_init = prepared_path["v0_guess_eci"]
+            B_init = B0_guess.copy()
+
+        group_initial_p0[prepared_path["shared_start_id"]].append(n.asarray(p0_init, dtype=float).copy())
+        group_initial_v0[prepared_path["shared_start_id"]].append(n.asarray(v0_init, dtype=float).copy())
+        group_initial_log_B0[prepared_path["shared_start_id"]].append(float(B_init[0]))
+        group_paths[prepared_path["shared_start_id"]].append(tuple(prepared_path["fit_ids"]))
+        local_initials.append(
+            {
+                "log_B1": float(B_init[1]),
+            }
+        )
+
+    for shared_start_id in shared_start_order:
+        p0_values = group_initial_p0[shared_start_id]
+        v0_values = group_initial_v0[shared_start_id]
+        log_B0_values = group_initial_log_B0[shared_start_id]
+        if len(p0_values) == 0 or len(v0_values) == 0 or len(log_B0_values) == 0:
+            exemplar_path = next(
+                path for path in prepared_paths if path["shared_start_id"] == shared_start_id
+            )
+            x0_parts.extend(n.asarray(exemplar_path["p0_guess_eci"], dtype=float).tolist())
+            x0_parts.extend(n.asarray(exemplar_path["v0_guess_eci"], dtype=float).tolist())
+            x0_parts.append(float(B0_guess[0]))
+        else:
+            x0_parts.extend(n.mean(n.vstack(p0_values), axis=0).tolist())
+            x0_parts.extend(n.mean(n.vstack(v0_values), axis=0).tolist())
+            x0_parts.append(float(n.mean(log_B0_values)))
+
+    for local_init in local_initials:
+        x0_parts.append(local_init["log_B1"])
+
+    x0 = n.asarray(x0_parts, dtype=float)
+
+    if verbose > 0:
+        print("shared start state and ballistic coefficient groups:")
+        for shared_start_id in shared_start_order:
+            members = group_paths[shared_start_id]
+            print("  start fragment %s:" % (shared_start_id))
+            for fit_ids in members:
+                print("    shares p0, v0, and B0 with path %s" % (" -> ".join(fit_ids)))
+
+    zero_wind_stage = run_joint_shared_start_fmin_stage(
+        prepared_paths,
+        shared_start_order,
+        x0,
+        dt_model,
+        gamma_fixed,
+        wind_models=None,
+        stage_name="zero_wind_joint",
+        verbose=verbose,
+    )
+
+    zero_wind_models = zero_wind_stage["models"]
+    zero_wind_wind_models = []
+    zero_wind_wind_model_info = []
+    for prepared_path, model in zip(prepared_paths, zero_wind_models):
+        zero_wind_result = {
+            "model": model,
+            "times_unix": prepared_path["times_unix"],
+            "dt_model": dt_model,
+        }
+
+        wind_model = None
+        wind_model_info = {
+            "type": "corotating_fallback",
+            "reason": "ERA5 refinement not attempted",
+        }
+        try:
+            wind_model, wind_model_info = build_cached_era5_wind_model_from_result(
+                zero_wind_result,
+                max_time_ahead=3600.0,
+                verbose=verbose,
+            )
+        except Exception as exc:
+            wind_model = None
+            wind_model_info = {
+                "type": "corotating_fallback",
+                "error": str(exc),
+            }
+
+        zero_wind_wind_models.append(wind_model)
+        zero_wind_wind_model_info.append(wind_model_info)
+
+    era5_stage = None
+    final_stage = zero_wind_stage
+    final_wind_model_info = list(zero_wind_wind_model_info)
+
+    if any(wind_model is not None for wind_model in zero_wind_wind_models):
+        if verbose > 0:
+            print("rerunning joint fit with cached ERA5 wind profiles")
+        era5_stage = run_joint_shared_start_fmin_stage(
+            prepared_paths,
+            shared_start_order,
+            zero_wind_stage["xopt"],
+            dt_model,
+            gamma_fixed,
+            wind_models=zero_wind_wind_models,
+            stage_name="era5_profile_joint",
+            verbose=verbose,
+        )
+        final_stage = era5_stage
+        final_wind_model_info = list(zero_wind_wind_model_info)
+
+    final_covariance = None if final_stage["covariance_info"] is None else final_stage["covariance_info"]["covariance"]
+    path_results = []
+    for i, prepared_path in enumerate(prepared_paths):
+        local_covariance_info = None
+        if final_stage["covariance_info"] is not None:
+            local_covariance = joint_shared_start_extract_local_covariance(
+                final_covariance,
+                i,
+                prepared_path,
+                final_stage["group_index"],
+                len(final_stage["shared_start_order"]),
+            )
+            local_covariance_info = {
+                "covariance": local_covariance,
+                "std": n.sqrt(n.maximum(n.diag(local_covariance), 0.0)),
+                "rss": final_stage["covariance_info"]["rss"],
+                "dof": final_stage["covariance_info"]["dof"],
+                "sigma2": final_stage["covariance_info"]["sigma2"],
+            }
+
+        path_results.append(
+            build_path_result_from_stage(
+                prepared_path,
+                final_stage["local_xs"][i],
+                local_covariance_info,
+                final_stage["models"][i],
+                final_stage["optimizer"],
+                optimizer_zero_wind=zero_wind_stage["optimizer"],
+                optimizer_era5=None if era5_stage is None else era5_stage["optimizer"],
+                dt_model=dt_model,
+                wind_model_info=final_wind_model_info[i],
+                plot_context_fragment_geo_pos=plot_context_fragment_geo_pos,
+                verbose=verbose,
+            )
+        )
+
+    shared_start_p0_eci = {}
+    shared_start_v0_eci = {}
+    shared_start_log_B0 = {}
+    for shared_start_id in final_stage["shared_start_order"]:
+        group_base = 7 * final_stage["group_index"][shared_start_id]
+        shared_start_p0_eci[shared_start_id] = n.asarray(
+            final_stage["xopt"][group_base:group_base + 3],
+            dtype=float,
+        ).copy()
+        shared_start_v0_eci[shared_start_id] = n.asarray(
+            final_stage["xopt"][group_base + 3:group_base + 6],
+            dtype=float,
+        ).copy()
+        shared_start_log_B0[shared_start_id] = float(final_stage["xopt"][group_base + 6])
+    shared_start_B0 = {
+        shared_start_id: float(10.0 ** shared_log_B0)
+        for shared_start_id, shared_log_B0 in shared_start_log_B0.items()
+    }
+
+    if verbose > 0:
+        print("fitted shared start states and ballistic coefficients:")
+        for shared_start_id in final_stage["shared_start_order"]:
+            print(
+                "  start fragment %s: p0=%s v0=%s log10(B0)=%1.6f B0=%1.6e m^2/kg"
+                % (
+                    shared_start_id,
+                    n.array2string(shared_start_p0_eci[shared_start_id], precision=3),
+                    n.array2string(shared_start_v0_eci[shared_start_id], precision=3),
+                    shared_start_log_B0[shared_start_id],
+                    shared_start_B0[shared_start_id],
+                )
+            )
+
+    return {
+        "path_results": path_results,
+        "shared_start_order": tuple(final_stage["shared_start_order"]),
+        "shared_start_p0_eci": shared_start_p0_eci,
+        "shared_start_v0_eci": shared_start_v0_eci,
+        "shared_start_log_B0": shared_start_log_B0,
+        "shared_start_B0": shared_start_B0,
+        "optimizer": dict(final_stage["optimizer"]),
+        "optimizer_zero_wind": dict(zero_wind_stage["optimizer"]),
+        "optimizer_era5": None if era5_stage is None else dict(era5_stage["optimizer"]),
+        "wind_model_info": list(final_wind_model_info),
+    }
+
+
 def impact_observables_enu(impact, ref_ecef, ref_lat_deg, ref_lon_deg):
     impact_pos_ecef = eci_to_ecef_position(
         impact["impact_pos_eci"],
@@ -1495,11 +2593,17 @@ def impact_observables_enu(impact, ref_ecef, ref_lat_deg, ref_lon_deg):
     )
 
 
-def estimate_impact_uncertainty(xhat, covariance_info, t, dt_model, density_profile=None):
+def estimate_impact_uncertainty(xhat, covariance_info, t, dt_model, density_profile=None, wind_model=None):
     if covariance_info is None:
         return None
 
-    nominal_model = build_model_from_parameters(xhat, t, dt_model, density_profile=density_profile)
+    nominal_model = build_model_from_parameters(
+        xhat,
+        t,
+        dt_model,
+        density_profile=density_profile,
+        wind_model=wind_model,
+    )
     nominal_result = {
         "model": nominal_model,
         "times_unix": t,
@@ -1512,7 +2616,13 @@ def estimate_impact_uncertainty(xhat, covariance_info, t, dt_model, density_prof
     )
 
     def impact_map(x):
-        model = build_model_from_parameters(x, t, dt_model, density_profile=density_profile)
+        model = build_model_from_parameters(
+            x,
+            t,
+            dt_model,
+            density_profile=density_profile,
+            wind_model=wind_model,
+        )
         impact = extrapolate_best_fit_to_ground(
             {
                 "model": model,
@@ -1572,6 +2682,7 @@ def fit_shared_ballistic_coefficient(
                                     fit_ids,
                                     gamma=0.5,
                                     B0_guess=[-3,-3],
+                                    plot_context_fragment_geo_pos=None,
                                     verbose=2):
     # Gamma is held fixed during the fit. The optimized parameters are the
     # initial ECI state, B0, fr1, and fr2.
@@ -1624,44 +2735,72 @@ def fit_shared_ballistic_coefficient(
         raise ValueError("Need at least three 3D measurements for the fit.")
 
     dt_model = 2.0#min(0.5, max((n.max(t) - n.min(t)) / 200.0, 0.05))
-    xopt, fopt, iterations, funcalls, warnflag = so.fmin(
-        objective_fmin,
+    zero_wind_stage = run_fmin_fit_stage(
         x0,
-        args=(t, pos_eci, dt_model, gamma_fixed, density_profile),
-        full_output=True,
-        maxiter=4000,
-        maxfun=10000,
-        disp=bool(verbose > 1),
+        t,
+        pos_eci,
+        dt_model,
+        gamma_fixed,
+        density_profile=density_profile,
+        wind_model=None,
+        stage_name="zero_wind",
+        verbose=verbose,
     )
-    residual_vector = residuals_lm(xopt, t, pos_eci, dt_model, gamma_fixed, density_profile=density_profile)
-    optimizer = {
-        "method": "fmin",
-        "x": xopt,
-        "fun": float(fopt),
-        "nit": int(iterations),
-        "nfev": int(funcalls),
-        "warnflag": int(warnflag),
-        "success": bool(warnflag == 0),
+    zero_wind_result = {
+        "model": zero_wind_stage["model"],
+        "times_unix": t,
+        "dt_model": dt_model,
     }
-    residual_jac = finite_difference_jacobian(
-        lambda x: residuals_lm(x, t, pos_eci, dt_model, gamma_fixed, density_profile=density_profile),
-        xopt,
-        parameter_step_sizes(xopt),
-    )
-    covariance_info = estimate_parameter_covariance(residual_jac, residual_vector)
 
-    xhat = n.asarray(xopt, dtype=float).copy()
+    wind_model = None
+    wind_model_info = {
+        "type": "corotating_fallback",
+        "reason": "ERA5 refinement not attempted",
+    }
+    era5_stage = None
+    try:
+        wind_model, wind_model_info = build_cached_era5_wind_model_from_result(
+            zero_wind_result,
+            max_time_ahead=3600.0,
+            verbose=verbose,
+        )
+        if wind_model is not None:
+            if verbose > 0:
+                print("rerunning fit with cached ERA5 wind profile")
+            era5_stage = run_fmin_fit_stage(
+                zero_wind_stage["xopt"],
+                t,
+                pos_eci,
+                dt_model,
+                gamma_fixed,
+                density_profile=density_profile,
+                wind_model=wind_model,
+                stage_name="era5_profile",
+                verbose=verbose,
+            )
+    except Exception as exc:
+        wind_model = None
+        wind_model_info = {
+            "type": "corotating_fallback",
+            "error": str(exc),
+        }
+
+    final_stage = zero_wind_stage if era5_stage is None else era5_stage
+    optimizer = final_stage["optimizer"]
+    covariance_info = final_stage["covariance_info"]
+    xhat = n.asarray(final_stage["xopt"], dtype=float).copy()
 
     p0_hat_eci = xhat[0:3]
     v0_hat_eci = xhat[3:6]
     B0 = xhat[6:8]
-    model = build_model_from_parameters(xhat, t, dt_model, density_profile=density_profile)
+    model = final_stage["model"]
 
     result = {
         "times_unix": t,
         "pos_ecef": pos_ecef,
         "pos_ecef_err": pos_ecef_err,
         "pos_eci": pos_eci,
+        "fit_ids": tuple(str(fid) for fid in fit_ids),
         "p0_guess_ecef": p0_guess_ecef,
         "v0_guess_ecef": v0_guess_ecef,
         "p0_guess_eci": p0_guess_eci,
@@ -1669,8 +2808,11 @@ def fit_shared_ballistic_coefficient(
         "p0_hat_eci": p0_hat_eci,
         "v0_hat_eci": v0_hat_eci,
         "B0_hat": B0,
+        "fit_stage": optimizer["stage"],
         "dt_model": dt_model,
         "optimizer": optimizer,
+        "optimizer_zero_wind": zero_wind_stage["optimizer"],
+        "optimizer_era5": None if era5_stage is None else era5_stage["optimizer"],
         "parameter_covariance": None if covariance_info is None else covariance_info["covariance"],
         "parameter_std": None if covariance_info is None else covariance_info["std"],
         "density_profile_altitude_m": density_profile["altitude_grid_m"],
@@ -1678,6 +2820,7 @@ def fit_shared_ballistic_coefficient(
         "density_profile_reference_time_unix": density_profile["reference_time_unix"],
         "density_profile_reference_lat_deg": density_profile["reference_lat_deg"],
         "density_profile_reference_lon_deg": density_profile["reference_lon_deg"],
+        "wind_model_info": wind_model_info,
         "specific_energy_loss_rate_w_kg": model["specific_energy_loss_rate_w_kg"],
         "specific_energy_loss_rate_interp": model["specific_energy_loss_rate_interp"],
         "speed_m_s": model["speed_m_s"],
@@ -1705,6 +2848,7 @@ def fit_shared_ballistic_coefficient(
                 t,
                 dt_model,
                 density_profile=density_profile,
+                wind_model=wind_model,
             )
         except ValueError as exc:
             result["impact_uncertainty"] = None
@@ -1718,12 +2862,18 @@ def fit_shared_ballistic_coefficient(
 
     hdf5_path = save_result_to_hdf5(result, fit_ids)
     result["hdf5_path"] = str(hdf5_path)
+    if plot_context_fragment_geo_pos is not None:
+        result["plot_context_fragment_geo_pos"] = plot_context_fragment_geo_pos
 
     if verbose > 0:
         print("p0_hat_eci", result["p0_hat_eci"])
         print("v0_hat_eci", result["v0_hat_eci"])
         #print("B0_hat", result["B0_hat"])
         #print("fr_hat", result["fr_hat"])
+        print("fit_stage", result["fit_stage"])
+        print("zero_wind_cost", zero_wind_stage["optimizer"]["fun"])
+        if era5_stage is not None:
+            print("era5_cost", era5_stage["optimizer"]["fun"])
         print("cost", optimizer["fun"])
         print("success", optimizer["success"])
         print("hdf5_path", result["hdf5_path"])
@@ -1747,7 +2897,7 @@ def fit_shared_ballistic_coefficient(
                 print("impact_uncertainty_error", result["impact_uncertainty_error"])
         elif "impact_error" in result:
             print("impact_error", result["impact_error"])
-        plot_ballistic_fit(result)
+        plot_ballistic_fit(result, show=bool(verbose > 1))
         #plot_density_profile(result)
         #plot_specific_energy_loss_rate(result)
         #plot_velocity_scatter(result)

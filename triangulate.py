@@ -6,7 +6,7 @@ import bright_stars
 
 import numpy as np
 from scipy.spatial import KDTree
-
+import stuffr
 from astropy import units as u
 from astropy.coordinates import Angle
 from astropy.coordinates import AltAz
@@ -190,7 +190,7 @@ def file_name_to_datetime(fname):
     t0 = Time("%s-%s-%sT%s:%s:%s"%(year,month,day,hour,mins,sec), format='isot', scale='utc') #+ dt
     return(t0)
 
-def get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",dt=0,calfile="ams216.mat",camera_id="2165",h=0,flip=False):
+def get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",dt=0,calfile="ams216.mat",camera_id="2165",h=0,flip=False,amsid="ams000"):
     # Path to your video
     
     cap = cv2.VideoCapture(video_path)
@@ -252,7 +252,7 @@ def get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",dt=0,calfile="am
     obs=EarthLocation(lon=long,height=h,lat=lat)
     #dt = TimeDelta(dur/2.0,format="sec")
     #aa_frame = AltAz(obstime=t0+dt, location=obs)
-    return({"camera_id":camera_id,"kd":kd,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"h":h,"t0":t0.unix+dt,"t1":t0.unix+dur+dt,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
+    return({"amsid":amsid,"camera_id":camera_id,"kd":kd,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"h":h,"t0":t0.unix+dt,"t1":t0.unix+dur+dt,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
 
 def xy_to_azel(az,el,x,y):
     return(az[int(x),int(y)],el[int(x),int(y)])
@@ -284,7 +284,7 @@ def get_video2():
 
     # needed for star plotting
     obs=EarthLocation(lon=long,height=0,lat=lat)
-    return({"camera_id":"0954","kd":kd,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"h":0,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
+    return({"amsid":"AMS95_5","camera_id":"0954","kd":kd,"az":az,"el":el,"obs":obs,"video_path":video_path,"lat":lat,"long":long,"h":0,"t0":t0.unix,"t1":t0.unix+dur,"frame_count":frame_count,"cap":cap,"fps":25.0,"fragments":{}})
 
 def fragment_positions():
     fl=glob.glob("fragments/*.h5")
@@ -350,7 +350,7 @@ def plot_star_pos(ax,bs,tnow,v):
             star_ys.append(y)
     ax.scatter(star_ys,star_xs,s=80, facecolors='none', edgecolors='w',alpha=0.2)
 
-def triangulate_dual(v1,v2):
+def triangulate_dual(v1,v2,annotate_ids=['1','2']):
     
     videos=[v1,v2]
 
@@ -369,7 +369,7 @@ def triangulate_dual(v1,v2):
 
     # go through all frames with dt spacing
     n_frames = int((t1_max-t0_min)/dt)
-
+    
     fragment_ids={}
     # go through all the frames
     for fi in range(n_frames):
@@ -397,16 +397,24 @@ def triangulate_dual(v1,v2):
             ret, frame = v["cap"].read()
 
             # if we get a frame succesfully 
+            fancyplot=True
             if ret:
                 # Convert from BGR (OpenCV default) to RGB for plotting
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                # plot frame
-                fig, ax = plt.subplots(1,1,figsize=(8*1.4,6.4*1.1))
-                ax.imshow(frame_rgb)
-                print("frame %d"%(idx))
+                # plot frame without axes/margins
+                fig, ax = plt.subplots(1,1,figsize=(4,3.2))
+                ax.imshow(frame_rgb, aspect='auto', interpolation='nearest')
+                if fancyplot:
+                    ax.set_axis_off()
+                    fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+                ax.text(10, 50, "%s %s"%(v["amsid"],Time(tnow, format='unix').iso.split(' ')[1].split('.')[0]), color="white")
+                print("frame %d" % (idx))
                 # instructions for usage
-                ax.set_title(f"zoom and position cursor, then press fragment id number (1-9) ")#%(lat,long))
+                if fancyplot:
+                    print("no title")
+                else:
+                    ax.set_title(f"zoom and position cursor, then press fragment id number (1-9) ")#%(lat,long))
                 
                 # plot stars. useful for checking that star calibration is correct
                 plot_stars=True
@@ -419,7 +427,7 @@ def triangulate_dual(v1,v2):
                 if show_fragments:
                     # reload all fragments from fragments directory
                     fp,ft=fragment_positions()
-
+                    fragnum=0
                     # go through all fragments
                     for frag in fp.keys():
                         poss=fp[frag]
@@ -440,13 +448,50 @@ def triangulate_dual(v1,v2):
                         fidx=n.where(ftimes >= tnow)[0]
                         # overplot fragments positions on image
                         # red means fragments with timestamp earlier than now
-                        ax.plot(frag_ys[hidx],frag_xs[hidx],".",color="red",alpha=0.5)
+                        if not fancyplot:
+                            ax.plot(frag_ys[hidx],frag_xs[hidx],".",color="red",alpha=0.5)
                         # green means fragments with timestamp later than or equal to now
-                        if len(hidx)>0:
-                            last_i=n.argmax(ftimes[hidx])
-                            ax.text(frag_ys[hidx[last_i]],frag_xs[hidx[last_i]],"%s"%(frag),color="red")
-                        ax.plot(frag_ys[fidx],frag_xs[fidx],".",color="green",alpha=0.5)
-                        
+                        if not fancyplot:
+   
+                            if len(hidx)>0:
+                                last_i=n.argmax(ftimes[hidx])
+                                ax.text(frag_ys[hidx[last_i]],frag_xs[hidx[last_i]],"%s"%(frag),color="red")
+                            ax.plot(frag_ys[fidx],frag_xs[fidx],".",color="green",alpha=0.5)
+                        if fancyplot:
+                            if len(frag_xs) >0:
+                                if (len(annotate_ids)==0) or (frag in annotate_ids):
+                                    delta_t=n.abs(ftimes-tnow)
+                                    fmi=n.argmin(delta_t)
+                                
+                                    if delta_t[fmi] < 0.5:
+                                        # only plot if more than 10 pixels from any image edge
+                                        h, w = v["az"].shape
+                                        fx = float(frag_xs[fmi])
+                                        fy = float(frag_ys[fmi])
+                                        if fx > 10 and fy > 10 and fx < (h - 10) and fy < (w - 10):
+                                            print("found",frag)
+                                        ax.scatter(fy,fx,s=80, facecolors='none', edgecolors="C%d"%(fragnum),alpha=0.5,label="%s"%(frag))
+                                        fragnum+=1
+
+
+                            
+#                leg = ax.legend(frameon=True)
+ #               leg.get_frame().set_alpha(0.5)  # partly transparent background            
+                handles, labels = ax.get_legend_handles_labels()
+                if handles:
+                    leg = ax.legend(frameon=True)
+
+                    # remove background fill
+                    leg.get_frame().set_facecolor('none')
+
+                    # make frame white
+                    leg.get_frame().set_edgecolor('white')
+                    leg.get_frame().set_linewidth(1.5)
+
+            # make legend text white
+            for text in leg.get_texts():
+                text.set_color('white')
+
                 # if we are on the second video, and we have 
                 # annotated fragments, draw a line from station 1 into space overlayed on camera 2
                 # this line should intersect with fragment on video 2. 
@@ -466,7 +511,18 @@ def triangulate_dual(v1,v2):
                             else:
                                 print("key",fid,"not in fragments")
                 # capture keyboard input
+
                 def onkey(event):
+                    if event.key == "'":
+                        # save current figure at 300 dpi. filename = amsid + tnow_key (ms)
+                        fname = f"{v['amsid']}_{tnow_key}.png"
+                        
+                        fig.savefig(fname, dpi=300, bbox_inches='tight')
+                        print(f"Saved {fname}")
+                        return
+#                    if event.key == "s":
+ #                       return 
+
                     # close frame
                     if event.key == "q":
                         return 
@@ -553,7 +609,7 @@ def triangulate_dual(v1,v2):
 v1=get_video2()
 
 # 3:44-3:45 Fragments: 1,2
-#v0=get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.mat",camera_id="2165")
+v0=get_video(video_path = "2025_02_19_03_44_00_000_012165.mp4",calfile="ams216.mat",camera_id="2165",amsid="AMS216_5")
 
 # 3:45:00 - 3:45:26 
 # flipped cal!
@@ -562,7 +618,7 @@ v1=get_video2()
 
 # 3:45:00 - 3:45:32
 # 5 fragments. okay top fragment.
-#v3=get_video(video_path = "2025_02_19_03_45_00_000_010125.mp4",calfile="ams21_5.mat",camera_id="0215")
+v3=get_video(video_path = "2025_02_19_03_45_00_000_010125.mp4",calfile="ams21_5.mat",camera_id="0215",amsid="AMS21_5")
 
 
 # 3:45:30 - 3:46:00 (calibration might be off near horizon)
@@ -575,41 +631,44 @@ v760=get_video(video_path="2025_02_19_03_44_00_000_010760.mp4",calfile="ams_761.
 # 5 fragments
 #v4=get_video(video_path = "2025_02_19_03_45_00_000_010121.mp4",dt=0.8,calfile="ams21_1.mat",camera_id="0211")
 
-#v522=get_video(video_path = "2025_02_19_03_45_01_000_010314_cam5.mp4",dt=0.0,calfile="AMS52_5.mat",camera_id="525")
+v522=get_video(video_path = "2025_02_19_03_45_01_000_010314_cam5.mp4",dt=0.0,calfile="AMS52_5.mat",camera_id="525",amsid="AMS52_5")
 
 #/Users/jvi019/Library/CloudStorage/OneDrive-UiTOffice365/falcon9
 
 # 3:45:00 - 3:46:00. low elevation
 # good top fragment!
-#v2=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
+v165=get_video(video_path = "2025_02_19_03_45_00_000_010095.mp4",dt=1.0,calfile="ams016.mat",camera_id="0165",amsid="AMS16_5")
+
 
 # 3:46:00 - 3:46:20
 # cam5 ams16
-#v7=get_video(video_path = "2025_02_19_03_46_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165")
+v165=get_video(video_path = "2025_02_19_03_46_00_000_010095.mp4",calfile="ams016.mat",camera_id="0165",amsid="AMS16_5")
 
 # 3:46:00 - 3:47:00
 # 2025_02_19_03_46_00_000_010880.mp4
-#v8=get_video(video_path = "2025_02_19_03_46_00_000_010880.mp4",calfile="0881.mat",h=126,camera_id="0881",flip=False)
+v881=get_video(video_path = "2025_02_19_03_46_00_000_010880.mp4",calfile="0881.mat",h=126,camera_id="0881",flip=False,amsid="AMS88_1")
 
 # 3:46:00 - 3:46:42 (good)
 # 2025_02_19_03_46_01_000_010031_ams0221.mp4
-v9=get_video(video_path = "2025_02_19_03_46_01_000_010031.mp4",calfile="0221.mat",camera_id="0221",flip=False)
-
+v221=get_video(video_path = "2025_02_19_03_46_01_000_010031.mp4",calfile="0221.mat",camera_id="0221",flip=False,amsid="AMS22_1")
 
 # 3:46:37 - 3:47:00
 # cam2 of lindenberg (ams22)
-v10=get_video(video_path = "2025_02_19_03_46_01_000_010028.mp4",dt=-0.8,calfile="0228.mat",h=145,camera_id="0228",flip=False)
+v10=get_video(video_path = "2025_02_19_03_46_01_000_010028.mp4",dt=-0.8,calfile="0228.mat",h=145,camera_id="0228",flip=False,amsid="AMS22_6")
+triangulate_dual(v165,v10,annotate_ids=['1','2','3','6'])
 
 # 3:46:07 - 3:46:43
 # 2025_02_19_03_46_00_000_010096.mp4
-v13=get_video(video_path = "2025_02_19_03_46_00_000_010096.mp4",dt=0,calfile="0166.mat",camera_id="0166",flip=False)
+v166=get_video(video_path = "2025_02_19_03_46_00_000_010096.mp4",dt=-0.6,calfile="0166.mat",camera_id="0166",flip=False,amsid="AMS16_6")
+#triangulate_dual(v165,v522,annotate_ids=['1','2'])
 
 
 # 3:47:01 - 3:47:30 (until no longer observable)
-#v11=get_video(video_path = "2025_02_19_03_47_01_000_010881_ams0882.mp4",calfile="0882.mat",camera_id="0882",flip=False)
+v882=get_video(video_path = "2025_02_19_03_47_01_000_010881_ams0882.mp4",calfile="0882.mat",camera_id="0882",flip=False,amsid="AMS88_2")
 # 3:47:00 - 3:47:30 (until not longer observable)
 #v12=get_video(video_path = "2025_02_19_03_47_01_000_010028_ams0228.mp4",dt=-0.8,calfile="0228.mat",camera_id="0228",flip=False)
 
+triangulate_dual(v882,v221,annotate_ids=['1','2','3','4','5','6'])
 
 
 # 3:46:10 - 3:46:50

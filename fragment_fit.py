@@ -186,25 +186,54 @@ hgt_count, hgt_count_all, fragment_ids, fragment_pos, fragment_pos_err, fragment
 #merge_ids=["5","1"]
 
 merge_ids_all=[
-    ["1"],
-    ["2"],
-    ["5","1"],
+    ["k","a","7","2"],
     ["9","o","1"],
-    ["z","w","p","1"],
     ["t","i","7","2"],
-    ["g","4","2"],
-    ["k","a","7","2"]]
+    
+#    ["g","4","2"],
 
+    ["z","w","p","1"],
+    ["5","1"],
+    ["1"],
+    ["2"]
+    ]
+
+
+path_specs = []
 for merge_ids in merge_ids_all:
     merged_times, merged_pos, merged_pos_err, merged_chain = merge_parent_measurements(merge_ids,fragment_times,fragment_pos,fragment_pos_err,fragment_ids)
-    plot_merged_measurements_lon_alt(",".join(merge_ids), fragment_geo_pos, merged_times, merged_pos, merged_chain)
-    plt.show()
+    fig = plot_merged_measurements_lon_alt(",".join(merge_ids), fragment_geo_pos, merged_times, merged_pos, merged_chain)
+    plt.close(fig)
 
-    result = fb3.fit_shared_ballistic_coefficient(
-        fragment_pos=merged_pos,
-        fragment_pos_err=merged_pos_err,
-        fragment_times=merged_times,
-        fit_ids=merged_chain,
-        B0_guess=[-3,-3],
-        verbose=2
+    first_pass_hdf5_path = fb3.build_fit_result_hdf5_path(merged_chain)
+    if first_pass_hdf5_path.exists():
+        print("skipping first pass for %s, using %s" % (" -> ".join(merged_chain), first_pass_hdf5_path.name))
+    else:
+        result = fb3.fit_shared_ballistic_coefficient(
+            fragment_pos=merged_pos,
+            fragment_pos_err=merged_pos_err,
+            fragment_times=merged_times,
+            fit_ids=merged_chain,
+            B0_guess=[-3,-3],
+            plot_context_fragment_geo_pos=fragment_geo_pos,
+            verbose=1
+        )
+        first_pass_hdf5_path = result["hdf5_path"]
+
+    path_specs.append(
+        {
+            "fragment_times": merged_times,
+            "fragment_pos": merged_pos,
+            "fragment_pos_err": merged_pos_err,
+            "fit_ids": merged_chain,
+            "initial_hdf5_path": str(first_pass_hdf5_path),
+        }
     )
+
+
+joint_second_pass = fb3.fit_multiple_paths_shared_start_ballistic_coefficient(
+    path_specs,
+    B0_guess=[-3, -3],
+    plot_context_fragment_geo_pos=fragment_geo_pos,
+    verbose=1,
+)

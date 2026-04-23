@@ -30,7 +30,7 @@ DEFAULT_RCS_LINKS = [
 ]
 LINK_DISPLAY_NAMES = {
     "jruh": "Juliusruh",
-    "kborn": "Kuhlungsborn",
+    "kborn": "Kühlungsborn",
     "bornim": "Bornim",
     "bornholm": "Bornholm",
     "hagenow": "Hagenow",
@@ -203,6 +203,7 @@ def load_decoded_power(tx="jruh", rx="bornim"):
     for file_path in file_paths:
         with h5py.File(file_path, "r") as handle:
             z = handle["decoded_data/voltage"][()] + handle["decoded_data/residual"][()]
+            # average polarization and channel
             power_block = n.sum(n.abs(z) ** 2.0, axis=(0, 1))
             chunk_start_unix = float(handle["decoded_data/chunk_start_time_ns"][()]) / 1e9
             tvec = chunk_start_unix + n.arange(power_block.shape[1], dtype=float) * DECODED_SAMPLE_INTERVAL_S
