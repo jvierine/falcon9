@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+from pathlib import Path
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
@@ -20,6 +21,36 @@ DEFAULT_PANEL_RANGE_LIMITS_KM = [
     (260.0, 360.0),  # g
     (210.0, 360.0),  # h
 ]
+
+SUMMARY_DIR = Path(__file__).with_name("simone").joinpath("decoded_summaries")
+SUMMARY_FILENAME_TEMPLATE = "snr_grid_{tx}_{rx}.npz"
+
+
+def get_summary_cache_path(tx, rx):
+    return SUMMARY_DIR / SUMMARY_FILENAME_TEMPLATE.format(tx=tx, rx=rx)
+
+
+def load_summary_cache(tx, rx):
+    cache_path = get_summary_cache_path(tx, rx)
+    if not cache_path.exists():
+        return None
+
+    with np.load(cache_path) as data:
+        times_unix = np.asarray(data["times_unix"], dtype=float)
+        times_datetime64 = np.array(times_unix * 1e9, dtype="datetime64[ns]")
+        return {
+            "times_unix": times_unix,
+            "times_datetime64": times_datetime64,
+            "range_km": np.asarray(data["range_km"], dtype=float),
+            "sn_plus_n_over_n_db": np.asarray(data["sn_plus_n_over_n_db"], dtype=float),
+        }
+
+
+def load_plot_grid(tx, rx):
+    summary = load_summary_cache(tx, rx)
+    if summary is not None:
+        return summary
+    return plot_deco.compute_rcs_grid(tx=tx, rx=rx)
 
 
 def parse_panel_ranges(value):
@@ -107,7 +138,7 @@ def plot_all_links(
     global_vmin = -10.0
     global_vmax = None
     for (tx, rx), (panel_ymin, panel_ymax) in zip(links, panel_ranges_km):
-        decoded = plot_deco.compute_rcs_grid(tx=tx, rx=rx)
+        decoded = load_plot_grid(tx=tx, rx=rx)
         _, sn_plot_db = plot_deco._slice_time_window(
             decoded["times_datetime64"],
             decoded["sn_plus_n_over_n_db"],
@@ -158,6 +189,7 @@ def plot_all_links(
 
         mesh = None
         for idx, (((tx, rx), (panel_ymin, panel_ymax)), ax) in enumerate(zip(zip(links, panel_ranges_km), axes.flat)):
+            decoded = load_plot_grid(tx=tx, rx=rx)
             result = plot_deco.plot_decoded(
                 tx=tx,
                 rx=rx,
@@ -173,6 +205,7 @@ def plot_all_links(
                 colorbar_label=r"$S/N + 1$ (dB)",
                 vmin=global_vmin,
                 vmax=global_vmax,
+                precomputed_grid=decoded,
             )
             if mesh is None:
                 mesh = result["mesh"]

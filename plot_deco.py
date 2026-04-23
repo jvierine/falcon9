@@ -304,8 +304,9 @@ def plot_decoded(
     vmax=60,
     field_name="rcs_dbsm",
     colorbar_label="RCS (dBsm)",
+    precomputed_grid=None,
 ):
-    decoded = compute_rcs_grid(tx=tx, rx=rx)
+    decoded = compute_rcs_grid(tx=tx, rx=rx) if precomputed_grid is None else precomputed_grid
     times_plot, rcs_dbsm = _slice_time_window(
         decoded["times_datetime64"],
         decoded[field_name],
