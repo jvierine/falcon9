@@ -7,6 +7,11 @@ import fit_ballistic3 as fb3
 
 import plot_fragments as pf
 
+B0_GUESS = [-3, -3, -3]
+DEBUG_PLOT = True
+DEBUG_PLOT_EVERY = 100
+
+
 def merge_parent_measurements(merge_ids,fragment_times,fragment_pos,fragment_pos_err,fragment_ids):
     if isinstance(merge_ids, str):
         merge_ids = [merge_ids]
@@ -196,7 +201,7 @@ merge_ids_all=[
     ["5","1"],
     ["1"],
     ["2"]
-    ]
+]
 
 
 path_specs = []
@@ -205,35 +210,28 @@ for merge_ids in merge_ids_all:
     fig = plot_merged_measurements_lon_alt(",".join(merge_ids), fragment_geo_pos, merged_times, merged_pos, merged_chain)
     plt.close(fig)
 
-    first_pass_hdf5_path = fb3.build_fit_result_hdf5_path(merged_chain)
-    if first_pass_hdf5_path.exists():
-        print("skipping first pass for %s, using %s" % (" -> ".join(merged_chain), first_pass_hdf5_path.name))
-    else:
-        result = fb3.fit_shared_ballistic_coefficient(
-            fragment_pos=merged_pos,
-            fragment_pos_err=merged_pos_err,
-            fragment_times=merged_times,
-            fit_ids=merged_chain,
-            B0_guess=[-3,-3],
-            plot_context_fragment_geo_pos=fragment_geo_pos,
-            verbose=1
-        )
-        first_pass_hdf5_path = result["hdf5_path"]
-
     path_specs.append(
         {
             "fragment_times": merged_times,
             "fragment_pos": merged_pos,
             "fragment_pos_err": merged_pos_err,
             "fit_ids": merged_chain,
-            "initial_hdf5_path": str(first_pass_hdf5_path),
+            "initial_hdf5_path": str(
+                fb3.build_fit_result_hdf5_path(
+                    merged_chain,
+                    filename_prefix="ballistic_fit_sharedstart",
+                )
+            ),
         }
     )
 
 
 joint_second_pass = fb3.fit_multiple_paths_shared_start_ballistic_coefficient(
     path_specs,
-    B0_guess=[-3, -3],
+    B0_guess=B0_GUESS,
     plot_context_fragment_geo_pos=fragment_geo_pos,
+    use_initial_hdf5=True,
+    debug_plot=DEBUG_PLOT,
+    debug_plot_every=DEBUG_PLOT_EVERY,
     verbose=1,
 )

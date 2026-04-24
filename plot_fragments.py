@@ -118,7 +118,7 @@ def get_radar_detections():
 
 def get_predicted_impacts():
     impact_points = []
-    fit_files = sorted(glob.glob("ballistic_fit*.h5"))
+    fit_files = sorted(glob.glob("ballistic_fit_shared*.h5"))
     for fit_file in fit_files:
         try:
             with h5py.File(fit_file, "r") as h:
@@ -406,24 +406,26 @@ def get_fragment_initial_detection_heights_km(fragment_geo_pos, fragment_times):
     return n.asarray(initial_heights_km, dtype=float)
 
 
-def get_radar_detection_heights_km(ralt):
-    radar_heights_km = []
-    for alt in ralt:
-        radar_heights_km.extend((n.asarray(alt, dtype=float) / 1e3).tolist())
-    radar_heights_km = n.asarray(radar_heights_km, dtype=float)
-    return radar_heights_km[n.isfinite(radar_heights_km)]
+def get_radar_detection_heights_km(ralt,rsnr):
+    radar_heights_km = n.concatenate(ralt)/1e3
+    radar_snr = n.concatenate(rsnr)
+    radar_heights_km=radar_heights_km[n.where(radar_snr>10)[0]]
+    return(radar_heights_km)
 
 
 def plot_height_hists(save_path="fragment_radar_height_hist.pdf", show=False):
     _, _, _, _, _, fragment_geo_pos, fragment_times = get_fragments()
-    _, _, ralt, _, _, _, _, _, _ = get_radar_detections()
+    #_, _, ralt, _, _, _, _, _, _ = get_radar_detections()
+    rlat, rlon, ralt, rsnr, rtime, bragg_enu, rdop,txid,rxid = get_radar_detections()
+    plt.hist(10.0*n.log10(n.concatenate(rsnr)),bins=50)
+    plt.show()
+
 
     fragment_initial_heights_km = get_fragment_initial_detection_heights_km(
         fragment_geo_pos,
         fragment_times,
     )
-    radar_heights_km = get_radar_detection_heights_km(ralt)
-
+    radar_heights_km = get_radar_detection_heights_km(ralt,rsnr)
     all_heights = n.concatenate((fragment_initial_heights_km, radar_heights_km))
     all_heights = all_heights[n.isfinite(all_heights)]
     if all_heights.size == 0:
@@ -499,7 +501,7 @@ def plot_height_hists(save_path="fragment_radar_height_hist.pdf", show=False):
                 label="Radar detection",
             ),
         ]
-        ax1.legend(handles=legend_handles, frameon=False, loc="lower right")
+        ax1.legend(handles=legend_handles, frameon=False, loc="upper right")
 
         if save_path is not None:
             fig.savefig(save_path, dpi=300, bbox_inches="tight")

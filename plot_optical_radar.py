@@ -142,6 +142,44 @@ def _plot_optical_measurements(
             )
 
 
+def _plot_optical_measurements_time(
+    ax,
+    fragment_ids,
+    fragment_geo_pos,
+    fragment_pos_err,
+    fragment_times,
+    optical_color_mode="gray",
+):
+    import plot_fragments as plf
+
+    for i in range(len(fragment_ids)):
+        tvals = plf.unix_to_datetime(fragment_times[i])
+        alt_pts_km = fragment_geo_pos[i][:, 2] / 1e3
+        err_m = 2.0 * fragment_pos_err[i]
+
+        point_color = "gray" if optical_color_mode == "gray" else f"C{i % 10}"
+        edge_color = "lightgray" if optical_color_mode == "gray" else "gray"
+
+        ax.errorbar(
+            tvals,
+            alt_pts_km,
+            yerr=(err_m / 1e3),
+            fmt=".",
+            label="Optical detection" if i == 0 else None,
+            zorder=15,
+            ecolor=edge_color,
+            elinewidth=0.8,
+            capsize=2,
+            color=point_color,
+            alpha=0.9,
+        )
+
+
+def _format_time_axis(ax):
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=4, maxticks=6))
+
+
 def _annotate_orbgen_fragment_columns(
     ax,
     fragment_ids,
@@ -208,6 +246,76 @@ def _annotate_orbgen_fragment_columns(
             )
 
 
+def _annotate_orbgen_fragment_time_bins(
+    ax,
+    fragment_ids,
+    fragment_geo_pos,
+    fragment_times,
+    annotation_fontsize=12.0,
+    time_bin_seconds=20.0,
+    altitude_margin_km=0,
+    stack_spacing_km=2.8,
+):
+    import plot_fragments as plf
+
+    bins = {}
+
+    for i, fid in enumerate(fragment_ids):
+        alt_pts_km = np.asarray(fragment_geo_pos[i][:, 2], dtype=float) / 1e3
+        times = np.asarray(fragment_times[i], dtype=float)
+        if alt_pts_km.size == 0 or times.size == 0:
+            continue
+
+        start_idx = int(np.argmin(times))
+        start_time = float(times[start_idx])
+        bin_start = time_bin_seconds * np.floor(start_time / time_bin_seconds)
+        bin_center = bin_start + 0.5 * time_bin_seconds
+
+        bins.setdefault(bin_center, []).append(
+            {
+                "fid": fid,
+                "lowest_alt": float(np.min(alt_pts_km)),
+                "color": f"C{i % 10}",
+            }
+        )
+
+    for bin_center, items in bins.items():
+        items.sort(key=lambda item: (-item["lowest_alt"], item["fid"]))
+        nearby_alts = []
+        for geo_pos, times in zip(fragment_geo_pos, fragment_times):
+            alt_pts_km = np.asarray(geo_pos[:, 2], dtype=float) / 1e3
+            times = np.asarray(times, dtype=float)
+            mask = np.isfinite(times) & np.isfinite(alt_pts_km) & (np.abs(times - bin_center) <= time_bin_seconds)
+            if np.any(mask):
+                nearby_alts.append(float(np.min(alt_pts_km[mask])))
+
+        if len(nearby_alts) > 0:
+            base_alt = min(nearby_alts) - altitude_margin_km
+        else:
+            base_alt = min(item["lowest_alt"] for item in items) - altitude_margin_km
+
+        label_time = plf.unix_to_datetime([bin_center])[0]
+        for idx, item in enumerate(items):
+            label_alt = base_alt - idx * stack_spacing_km
+            ax.text(
+                label_time,
+                label_alt,
+                item["fid"],
+                color=item["color"],
+                fontsize=annotation_fontsize,
+                fontweight="bold",
+                va="top",
+                ha="center",
+                zorder=30,
+                bbox={
+                    "facecolor": "white",
+                    "edgecolor": "none",
+                    "alpha": 0.9,
+                    "pad": 0.35,
+                },
+            )
+
+
 def plot_orbgen_lon_alt_panel(ax, title=None, font_scale=1.0):
     from matplotlib.lines import Line2D
 
@@ -255,6 +363,41 @@ def plot_orbgen_lon_alt_panel(ax, title=None, font_scale=1.0):
     return ax
 
 
+def plot_orbgen_time_alt_panel(ax, title=None, font_scale=1.0):
+    style = publication_panel_style(font_scale=font_scale)
+    _, _, fragment_ids, fragment_pos, fragment_pos_err, fragment_geo_pos, fragment_times = _panel_fragment_data()
+
+    _plot_optical_measurements_time(
+        ax,
+        fragment_ids,
+        fragment_geo_pos,
+        fragment_pos_err,
+        fragment_times,
+        optical_color_mode="color",
+    )
+
+    _annotate_orbgen_fragment_time_bins(
+        ax,
+        fragment_ids,
+        fragment_geo_pos,
+        fragment_times,
+        annotation_fontsize=max(12.0, style["annotation_fontsize"] * 1.5),
+    )
+
+    handles, labels = ax.get_legend_handles_labels()
+    if len(handles) > 0:
+        ax.legend(handles=handles, labels=labels, frameon=False, loc="lower left", fontsize=style["legend_fontsize"])
+    ax.tick_params(labelsize=style["tick_label_fontsize"])
+    ax.set_xlabel("Time (UTC)", fontsize=style["axis_label_fontsize"])
+    ax.set_ylabel("Altitude (km)", fontsize=style["axis_label_fontsize"])
+    if title is not None:
+        ax.set_title(title, fontsize=style["title_fontsize"])
+    _format_time_axis(ax)
+    ax.grid(True, linestyle="--", linewidth=0.5)
+    ax.set_ylim(bottom=0.0)
+    return ax
+
+
 def plot_radar_lon_alt_panel(ax, title=None, font_scale=1.0):
     style = publication_panel_style(font_scale=font_scale)
     _, _, fragment_ids, fragment_pos, fragment_pos_err, fragment_geo_pos, fragment_times = _panel_fragment_data()
@@ -291,6 +434,49 @@ def plot_radar_lon_alt_panel(ax, title=None, font_scale=1.0):
         ax.set_title(title, fontsize=style["title_fontsize"])
     ax.grid(True, linestyle="--", linewidth=0.5)
     ax.set_xlim([3, 17.5])
+    ax.set_ylim(bottom=0.0)
+    return ax
+
+
+def plot_radar_time_alt_panel(ax, title=None, font_scale=1.0):
+    import plot_fragments as plf
+
+    style = publication_panel_style(font_scale=font_scale)
+    _, _, fragment_ids, fragment_pos, fragment_pos_err, fragment_geo_pos, fragment_times = _panel_fragment_data()
+    rlat, rlon, ralt, rsnr, rtime, bragg_enu, rdop, txid, rxid = _panel_radar_data()
+
+    _plot_optical_measurements_time(
+        ax,
+        fragment_ids,
+        fragment_geo_pos,
+        fragment_pos_err,
+        fragment_times,
+        optical_color_mode="gray",
+    )
+
+    for i in range(len(rlat)):
+        idx = n.where(rsnr[i] > -10)[0]
+        if len(idx) > 0:
+            ax.plot(
+                plf.unix_to_datetime(rtime[i][idx]),
+                ralt[i][idx] / 1e3,
+                ".",
+                color=f"C{i % 10}",
+                ms=5,
+                zorder=999,
+                label=f"{txid[i]}-{rxid[i]}",
+            )
+
+    handles, labels = ax.get_legend_handles_labels()
+    if len(handles) > 0:
+        ax.legend(handles=handles, labels=labels, frameon=False, loc="lower left", fontsize=style["legend_fontsize"])
+    ax.tick_params(labelsize=style["tick_label_fontsize"])
+    ax.set_xlabel("Time (UTC)", fontsize=style["axis_label_fontsize"])
+    ax.set_ylabel("Altitude (km)", fontsize=style["axis_label_fontsize"])
+    if title is not None:
+        ax.set_title(title, fontsize=style["title_fontsize"])
+    _format_time_axis(ax)
+    ax.grid(True, linestyle="--", linewidth=0.5)
     ax.set_ylim(bottom=0.0)
     return ax
 

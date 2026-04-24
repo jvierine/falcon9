@@ -183,8 +183,8 @@ if __name__ == "__main__":
     t0 = dt.datetime.fromisoformat("2025-02-19T03:45:40")
     t1 = dt.datetime.fromisoformat("2025-02-19T03:46:30")
 
-  #  axs[0].set_xlim(t0, t1)
- #   axs[1].set_xlim(t0, t1)
-#    axs[0].set_ylim([200,600])
+    axs[0].set_xlim(t0, t1)
+    axs[1].set_xlim(t0, t1)
+    axs[0].set_ylim([200,600])
    # fig.savefig("doppler_shift_figure.pdf",format="pdf",bbox_inches="tight",transparent=True)
     plt.show()

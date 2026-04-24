@@ -55,18 +55,20 @@ def create_2x2_figure(output="optical_radar_2x2.pdf", labels=None, font_scale=1.
     label_fontsize = 16.0 * float(font_scale)
     axis_label_fontsize = 17.0 * float(font_scale)
     tick_label_fontsize = 14.0 * float(font_scale)
+    left_xlabel_fontsize = axis_label_fontsize
+    right_xlabel_fontsize = axis_label_fontsize
 
     with plt.rc_context(rcparams):
         fig, axes = plt.subplots(
             2,
             2,
             figsize=(12.8, 9.8),
-            sharex=True,
+            sharex="col",
             sharey=True,
             constrained_layout=True,
         )
 
-        plot_optical_radar.plot_orbgen_lon_alt_panel(
+        plot_optical_radar.plot_orbgen_time_alt_panel(
             axes[0, 0],
             title=None,
             font_scale=font_scale,
@@ -77,21 +79,20 @@ def create_2x2_figure(output="optical_radar_2x2.pdf", labels=None, font_scale=1.
             font_scale=font_scale,
             add_colorbar=True,
         )
-        plot_optical_radar.plot_fit_energy_lon_alt_panel(
+        plot_optical_radar.plot_radar_time_alt_panel(
             axes[1, 0],
+            title=None,
+            font_scale=font_scale,
+        )
+        plot_optical_radar.plot_fit_energy_lon_alt_panel(
+            axes[1, 1],
             title=None,
             font_scale=font_scale,
             add_colorbar=True,
         )
-        plot_optical_radar.plot_radar_lon_alt_panel(
-            axes[1, 1],
-            title=None,
-            font_scale=font_scale,
-        )
 
         for ax in axes.flat:
-            ax.set_xlim([-2.5, 20.5])
-            ax.set_ylim(bottom=0.0)
+            ax.set_ylim(bottom=20.0)
             ax.set_xlabel("")
             ax.set_ylabel("")
             ax.tick_params(labelsize=tick_label_fontsize)
@@ -102,7 +103,9 @@ def create_2x2_figure(output="optical_radar_2x2.pdf", labels=None, font_scale=1.
         for ax in axes[:, 1]:
             ax.tick_params(labelleft=False)
 
-        fig.supxlabel("Longitude (deg)", fontsize=axis_label_fontsize)
+        axes[1, 0].tick_params(axis="x", labelrotation=30)
+        #fig.text(0.27, 0.02, "Time (UTC)", ha="center", va="center", fontsize=left_xlabel_fontsize)
+        fig.text(0.74, 0.02, "Longitude (deg)", ha="center", va="center", fontsize=right_xlabel_fontsize)
         fig.supylabel("Altitude (km)", fontsize=axis_label_fontsize)
 
         for ax, label in zip(axes.flat, labels):

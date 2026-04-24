@@ -97,11 +97,11 @@ def get_fragment_info(tx="kborn",rx="hagenow"):
             k=(ecefs[:,j]-tx_ecef)-(rx_ecef-ecefs[:,j])
             k0=k/n.linalg.norm(k)
             #print(n.linalg.norm(k0))
-            k=k0*2*n.pi/lam
+            k=k0*4*n.pi/lam
             #vel_ecef[:,j]
           #  print(n.linalg.norm(vel_ecef[j,:]))
 
-            dop[j]=n.dot(k,vel_ecef[j,:])
+            dop[j]=-n.dot(k,vel_ecef[j,:])/2/n.pi
             aspect[j]=n.arccos(dop[j]/(n.linalg.norm(k)*n.linalg.norm(vel_ecef[j,:])))
         fragment_aspects.append(aspect)
         fragment_dops.append(dop)
