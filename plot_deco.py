@@ -9,6 +9,8 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as n
 import numpy as np
+import fit_ballistic3 as fb3
+import mean_free_path as mfp
 import plot_fragments as pf
 import scipy.constants as sc
 import scipy.interpolate as sint
@@ -272,6 +274,212 @@ def _slice_time_window(times_dt64, values, start_time=None, end_time=None):
     return times_dt64[mask], values[:, mask]
 
 
+def _select_peak_range_gate(range_km, values, ymin=100, ymax=600):
+    range_km = n.asarray(range_km, dtype=float)
+    values = n.asarray(values, dtype=float)
+    ridx = n.where((range_km >= ymin) & (range_km <= ymax))[0]
+    if ridx.size == 0:
+        raise ValueError("No range bins fall inside the requested ymin/ymax interval.")
+
+    gate_peak_values = n.nanmax(values[ridx, :], axis=1)
+    if not n.any(n.isfinite(gate_peak_values)):
+        raise ValueError("No finite values were found in the requested time/range window.")
+
+    best_local_idx = int(n.nanargmax(gate_peak_values))
+    gate_idx = int(ridx[best_local_idx])
+    return gate_idx, float(range_km[gate_idx]), float(gate_peak_values[best_local_idx])
+
+
+def fit_exponential_efolding_time(times_dt64, linear_values, fit_start_time=None, fit_end_time=None):
+    fit_start_dt64 = _coerce_datetime64(fit_start_time)
+    fit_end_dt64 = _coerce_datetime64(fit_end_time)
+
+    times_dt64 = n.asarray(times_dt64)
+    linear_values = n.asarray(linear_values, dtype=float)
+
+    mask = n.isfinite(linear_values) & (linear_values > 0.0)
+    if fit_start_dt64 is not None:
+        mask &= times_dt64 >= fit_start_dt64
+    if fit_end_dt64 is not None:
+        mask &= times_dt64 <= fit_end_dt64
+
+    if n.count_nonzero(mask) < 3:
+        raise ValueError("Need at least three positive samples inside the fit window.")
+
+    fit_times = times_dt64[mask]
+    fit_values = linear_values[mask]
+    fit_seconds = (
+        fit_times.astype("datetime64[ns]").astype("int64")
+        - fit_times[0].astype("datetime64[ns]").astype("int64")
+    ) * 1e-9
+    log_values = n.log(fit_values)
+
+    coeffs, covariance = n.polyfit(fit_seconds, log_values, deg=1, cov=True)
+    slope = float(coeffs[0])
+    intercept = float(coeffs[1])
+    slope_sigma = float(n.sqrt(max(covariance[0, 0], 0.0)))
+
+    if slope >= 0.0:
+        raise ValueError("Fitted exponential slope is non-negative; no decay time can be estimated.")
+
+    tau_s = -1.0 / slope
+    tau_sigma_s = abs(slope_sigma / (slope * slope))
+
+    model_values = n.exp(intercept + slope * fit_seconds)
+    return {
+        "fit_times_datetime64": fit_times,
+        "fit_values_linear": fit_values,
+        "fit_model_linear": model_values,
+        "slope": slope,
+        "slope_sigma": slope_sigma,
+        "tau_s": tau_s,
+        "tau_2sigma_s": 2.0 * tau_sigma_s,
+    }
+
+
+def get_fragment_fit_tx_rx_ranges_km(
+    tx,
+    rx,
+    time_dt64,
+    fit_path="ballistic_fit_sharedstart_1.h5",
+):
+    fit_path = Path(fit_path)
+    if not fit_path.is_absolute():
+        fit_path = Path(__file__).resolve().parent / fit_path
+
+    with h5py.File(fit_path, "r") as handle:
+        group = handle["model"]
+        times_model = n.asarray(group["times_model"][()], dtype=float)
+        lat_deg = n.asarray(group["lat_deg"][()], dtype=float)
+        lon_deg = n.asarray(group["lon_deg"][()], dtype=float)
+        hgt_m = n.asarray(group["hgt_m"][()], dtype=float)
+
+    target_times_ns = n.asarray(time_dt64, dtype="datetime64[ns]").astype("int64")
+    scalar_input = target_times_ns.ndim == 0
+    target_times_ns = n.atleast_1d(target_times_ns)
+    target_times_unix = target_times_ns.astype(float) * 1e-9
+
+    tmin = float(n.nanmin(times_model))
+    tmax = float(n.nanmax(times_model))
+    target_times_unix = n.clip(target_times_unix, tmin, tmax)
+
+    lat_i = n.interp(target_times_unix, times_model, lat_deg)
+    lon_i = n.interp(target_times_unix, times_model, lon_deg)
+    hgt_i = n.interp(target_times_unix, times_model, hgt_m)
+
+    tx_latlon = simone_conf.station_coords["tx"][tx]
+    rx_latlon = simone_conf.station_coords["rx"][rx]
+    tx_ecef = n.asarray(jcoord.geodetic2ecef(tx_latlon[0], tx_latlon[1], 10.0), dtype=float)
+    rx_ecef = n.asarray(jcoord.geodetic2ecef(rx_latlon[0], rx_latlon[1], 10.0), dtype=float)
+    target_ecef = n.asarray(
+        [jcoord.geodetic2ecef(lat, lon, hgt) for lat, lon, hgt in zip(lat_i, lon_i, hgt_i)],
+        dtype=float,
+    )
+
+    r_tx_km = n.linalg.norm(target_ecef - tx_ecef[None, :], axis=1) / 1e3
+    r_rx_km = n.linalg.norm(target_ecef - rx_ecef[None, :], axis=1) / 1e3
+
+    result = {
+        "time_unix": target_times_unix,
+        "lat_deg": lat_i,
+        "lon_deg": lon_i,
+        "hgt_km": hgt_i / 1e3,
+        "r_tx_km": r_tx_km,
+        "r_rx_km": r_rx_km,
+    }
+    if scalar_input:
+        return {key: float(value[0]) for key, value in result.items()}
+    return result
+
+
+def load_fragment_fit_model_trajectory(fit_path="ballistic_fit_sharedstart_1.h5"):
+    fit_path = Path(fit_path)
+    if not fit_path.is_absolute():
+        fit_path = Path(__file__).resolve().parent / fit_path
+
+    with h5py.File(fit_path, "r") as handle:
+        group = handle["model"]
+        return {
+            "times_unix": n.asarray(group["times_model"][()], dtype=float),
+            "pos_eci": n.asarray(group["pos_eci"][()], dtype=float),
+            "vel_eci": n.asarray(group["vel_eci"][()], dtype=float),
+            "lat_deg": n.asarray(group["lat_deg"][()], dtype=float),
+            "lon_deg": n.asarray(group["lon_deg"][()], dtype=float),
+            "hgt_m": n.asarray(group["hgt_m"][()], dtype=float),
+        }
+
+
+def get_fragment_fit_bragg_geometry(
+    tx,
+    rx,
+    time_dt64,
+    fit_path="ballistic_fit_sharedstart_1.h5",
+):
+    track = load_fragment_fit_model_trajectory(fit_path=fit_path)
+
+    target_times_ns = n.asarray(time_dt64, dtype="datetime64[ns]").astype("int64")
+    scalar_input = target_times_ns.ndim == 0
+    target_times_ns = n.atleast_1d(target_times_ns)
+    target_times_unix = target_times_ns.astype(float) * 1e-9
+
+    tmin = float(n.nanmin(track["times_unix"]))
+    tmax = float(n.nanmax(track["times_unix"]))
+    target_times_unix = n.clip(target_times_unix, tmin, tmax)
+
+    pos_eci = n.column_stack(
+        [
+            n.interp(target_times_unix, track["times_unix"], track["pos_eci"][:, axis])
+            for axis in range(3)
+        ]
+    )
+    vel_eci = n.column_stack(
+        [
+            n.interp(target_times_unix, track["times_unix"], track["vel_eci"][:, axis])
+            for axis in range(3)
+        ]
+    )
+
+    tx_latlon = simone_conf.station_coords["tx"][tx]
+    rx_latlon = simone_conf.station_coords["rx"][rx]
+    tx_ecef = n.asarray(jcoord.geodetic2ecef(tx_latlon[0], tx_latlon[1], 10.0), dtype=float)
+    rx_ecef = n.asarray(jcoord.geodetic2ecef(rx_latlon[0], rx_latlon[1], 10.0), dtype=float)
+
+    tx_eci = fb3.ecef_to_eci_position(
+        n.repeat(tx_ecef[None, :], target_times_unix.size, axis=0),
+        target_times_unix,
+    )
+    rx_eci = fb3.ecef_to_eci_position(
+        n.repeat(rx_ecef[None, :], target_times_unix.size, axis=0),
+        target_times_unix,
+    )
+
+    tx_to_target = pos_eci - tx_eci
+    target_to_rx = rx_eci - pos_eci
+    tx_to_target_norm = n.linalg.norm(tx_to_target, axis=1)
+    target_to_rx_norm = n.linalg.norm(target_to_rx, axis=1)
+    u_tx = tx_to_target / n.maximum(tx_to_target_norm[:, None], 1e-12)
+    u_rx = target_to_rx / n.maximum(target_to_rx_norm[:, None], 1e-12)
+    k_bragg = u_tx - u_rx
+
+    cos_theta = n.sum(k_bragg * vel_eci, axis=1) / (
+        n.maximum(n.linalg.norm(k_bragg, axis=1), 1e-12)
+        * n.maximum(n.linalg.norm(vel_eci, axis=1), 1e-12)
+    )
+    cos_theta = n.clip(cos_theta, -1.0, 1.0)
+    aspect_deg = n.degrees(n.arccos(cos_theta))
+
+    result = {
+        "time_unix": target_times_unix,
+        "aspect_deg": aspect_deg,
+        "r_tx_km": tx_to_target_norm / 1e3,
+        "r_rx_km": target_to_rx_norm / 1e3,
+        "propagation_range_km": (tx_to_target_norm + target_to_rx_norm) / 1e3,
+    }
+    if scalar_input:
+        return {key: float(value[0]) for key, value in result.items()}
+    return result
+
+
 def publication_rcparams():
     return {
         "figure.dpi": 150,
@@ -305,6 +513,11 @@ def plot_decoded(
     field_name="rcs_dbsm",
     colorbar_label="RCS (dBsm)",
     precomputed_grid=None,
+    fit_path="ballistic_fit_sharedstart_1.h5",
+    overlay_predicted_range=True,
+    show_aspect_axis=True,
+    aspect_time_shift_s=-1.0,
+    aspect_tick_values=(130, 110, 90, 70, 50),
 ):
     decoded = compute_rcs_grid(tx=tx, rx=rx) if precomputed_grid is None else precomputed_grid
     times_plot, rcs_dbsm = _slice_time_window(
@@ -331,15 +544,62 @@ def plot_decoded(
         cmap=cmap,
         rasterized=True,
     )
+    if overlay_predicted_range:
+        range_info = get_fragment_fit_bragg_geometry(
+            tx=tx,
+            rx=rx,
+            time_dt64=times_plot,
+            fit_path=fit_path,
+        )
+        ax.plot(
+            times_plot,
+            range_info["propagation_range_km"],
+            color="white",
+            linestyle="--",
+            linewidth=1.0,
+            alpha=0.75,
+            zorder=5,
+        )
     ax.set_ylim(ymin, ymax)
     ax.set_xlabel("Time (UTC)")
     ax.set_ylabel("Propagation range (km)")
-    ax.set_title(get_link_display_name(tx, rx) if title is None else title, pad=4)
+    if title is not None:
+        ax.set_title(title, pad=4)
     ax.xaxis_date()
     ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=4, maxticks=6))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S", tz=timezone.utc))
     ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
     ax.tick_params(top=False, right=True)
+
+    if show_aspect_axis:
+        shifted_times_plot = times_plot + n.timedelta64(int(aspect_time_shift_s * 1e9), "ns")
+        shifted_aspect = get_fragment_fit_bragg_geometry(
+            tx=tx,
+            rx=rx,
+            time_dt64=shifted_times_plot,
+            fit_path=fit_path,
+        )["aspect_deg"]
+        time_nums = mdates.date2num(times_plot.astype("datetime64[ms]"))
+        if created_fig:
+            fig.canvas.draw()
+        top_ax = ax.twiny()
+        top_ax.set_xlim(ax.get_xlim())
+        finite = n.isfinite(time_nums) & n.isfinite(shifted_aspect)
+        if n.count_nonzero(finite) >= 2:
+            aspect_sorted_idx = n.argsort(shifted_aspect[finite])
+            aspect_sorted = shifted_aspect[finite][aspect_sorted_idx]
+            time_sorted = time_nums[finite][aspect_sorted_idx]
+            tick_labels = []
+            tick_locs = []
+            for tick_val in aspect_tick_values:
+                if aspect_sorted[0] <= tick_val <= aspect_sorted[-1]:
+                    tick_locs.append(float(n.interp(tick_val, aspect_sorted, time_sorted)))
+                    tick_labels.append(f"{tick_val:.0f}")
+            if tick_locs:
+                top_ax.set_xticks(tick_locs)
+                top_ax.set_xticklabels(tick_labels)
+        top_ax.set_xlabel("Aspect angle (deg)")
+        top_ax.tick_params(direction="out")
 
     if created_fig and add_colorbar:
         cb = fig.colorbar(pcm, ax=ax, pad=0.01)
@@ -372,6 +632,7 @@ def plot_rcs_vs_aspect(
     ymax=600,
     output_filename="rcs_vs_aspect_single_column.pdf",
     show=True,
+    fit_path="ballistic_fit_sharedstart_1.h5",
 ):
     decoded = compute_rcs_grid(tx=tx, rx=rx)
     ridx = n.where((decoded["range_km"] > ymin) & (decoded["range_km"] < ymax))[0]
@@ -381,29 +642,23 @@ def plot_rcs_vs_aspect(
     rcs_dbsm = decoded["rcs_dbsm"]
     rcs_aspect_db = n.max(rcs_dbsm[ridx, :], axis=0)
 
-    fragment_aspects, _, _, _ = get_fragment_info(tx=tx, rx=rx)
-    _, _, fragment_ids, _, _, _, fragment_times = pf.get_fragments()
+    aspect_info = get_fragment_fit_bragg_geometry(
+        tx=tx,
+        rx=rx,
+        time_dt64=decoded["times_datetime64"],
+        fit_path=fit_path,
+    )
 
     with plt.rc_context(publication_rcparams()):
         fig, ax = plt.subplots(figsize=(3.5, 2.2), constrained_layout=True)
 
-        for i, fid in enumerate(fragment_ids):
-            if fid not in ("1", "2"):
-                continue
-            aspect_int = sint.interp1d(
-                fragment_times[i],
-                fragment_aspects[i],
-                bounds_error=False,
-                fill_value=n.nan,
-            )
-            aspect_deg = 180.0 * aspect_int(decoded["times_unix"]) / n.pi
-            ax.plot(
-                aspect_deg,
-                rcs_aspect_db,
-                ".",
-                markersize=2.5,
-                label=fid,
-            )
+        ax.plot(
+            aspect_info["aspect_deg"],
+            rcs_aspect_db,
+            ".",
+            markersize=2.5,
+            label="$F_1$ fit",
+        )
 
         ax.set_xticks(np.arange(40, 131, 10))
         ax.set_xlabel("Aspect angle (deg)")
@@ -422,5 +677,172 @@ def plot_rcs_vs_aspect(
             plt.close(fig)
 
 
+def plot_peak_snr_gate_timeseries(
+    tx="jruh",
+    rx="bornim",
+    start_time=None,
+    end_time=None,
+    fit_start_time=None,
+    fit_end_time=None,
+    ymin=100,
+    ymax=600,
+    ylimits_db=(0, 50),
+    ax=None,
+    show=True,
+    output_filename="rcs_peak_gate_timeseries_single_column.pdf",
+    title=None,
+    precomputed_grid=None,
+):
+    decoded = compute_rcs_grid(tx=tx, rx=rx) if precomputed_grid is None else precomputed_grid
+    times_plot, snr_db = _slice_time_window(
+        decoded["times_datetime64"],
+        decoded["sn_plus_n_over_n_db"],
+        start_time=start_time,
+        end_time=end_time,
+    )
+    _, sn_plus_n_over_n_linear = _slice_time_window(
+        decoded["times_datetime64"],
+        decoded["snr"],
+        start_time=start_time,
+        end_time=end_time,
+    )
+    gate_idx, gate_range_km, peak_snr_db = _select_peak_range_gate(
+        decoded["range_km"],
+        snr_db,
+        ymin=ymin,
+        ymax=ymax,
+    )
+    time_series_range_info = get_fragment_fit_tx_rx_ranges_km(tx=tx, rx=rx, time_dt64=times_plot)
+    rcs_linear = sn_plus_n_over_n_to_rcs(
+        sn_plus_n_over_n_linear[gate_idx, :].copy(),
+        n.asarray(time_series_range_info["r_tx_km"], dtype=float) * 1e3,
+        n.asarray(time_series_range_info["r_rx_km"], dtype=float) * 1e3,
+    )
+    rcs_linear = n.where(n.isfinite(rcs_linear) & (rcs_linear > 0.0), rcs_linear, n.nan)
+    rcs_dbsm = 10.0 * n.log10(n.where(n.isfinite(rcs_linear) & (rcs_linear > 0.0), rcs_linear, 1e-12))
+    fit_result = fit_exponential_efolding_time(
+        times_plot,
+        rcs_linear,
+        fit_start_time=fit_start_time,
+        fit_end_time=fit_end_time,
+    )
+    peak_idx = int(n.nanargmax(snr_db[gate_idx, :]))
+    peak_time_dt64 = times_plot[peak_idx]
+    range_info = get_fragment_fit_tx_rx_ranges_km(tx=tx, rx=rx, time_dt64=peak_time_dt64)
+    peak_rcs_dbsm = float(rcs_dbsm[peak_idx])
+    peak_height_km = float(range_info["hgt_km"])
+    peak_mean_free_path_m = mfp.mean_free_path_m(
+        time_dt64=peak_time_dt64,
+        lat_deg=float(range_info["lat_deg"]),
+        lon_deg=float(range_info["lon_deg"]),
+        alt_km=peak_height_km,
+    )
+
+    created_fig = ax is None
+    if created_fig:
+        with plt.rc_context(publication_rcparams()):
+            fig, ax = plt.subplots(figsize=(4.1, 2.2), constrained_layout=True)
+    else:
+        fig = ax.figure
+
+    ax.plot(
+        times_plot,
+        rcs_dbsm,
+        ".",
+        color="black",
+        markersize=1.5,
+        linewidth=1.2,
+        label=f"RCS",
+    )
+    ax.plot(
+        fit_result["fit_times_datetime64"],
+        10.0 * n.log10(n.maximum(fit_result["fit_model_linear"], 1e-12)),
+        color="#cb181d",
+        linewidth=1.3,
+        linestyle="--",
+        label="Exponential fit",
+    )
+    ax.set_xlabel("Time (UTC)")
+    ax.set_ylabel("RCS (dBsm)")
+    ax.set_title(
+        get_link_display_name(tx, rx) if title is None else title,
+        pad=4,
+    )
+    ax.xaxis_date()
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=4, maxticks=6))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S", tz=timezone.utc))
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
+    ax.tick_params(top=False, right=True)
+    ax.grid(linestyle=":", linewidth=0.5, alpha=0.5)
+    if start_time is not None or end_time is not None:
+        x0 = _coerce_datetime64(start_time) if start_time is not None else times_plot[0]
+        x1 = _coerce_datetime64(end_time) if end_time is not None else times_plot[-1]
+        ax.set_xlim(x0, x1)
+    if ylimits_db is not None:
+        ax.set_ylim(*ylimits_db)
+    ax.legend(frameon=False, loc="upper right")
+    ax.text(
+        0.02,
+        0.96,
+        (
+            f"Peak RCS: {peak_rcs_dbsm:.1f} dBsm\n"
+            f"$h$ = {peak_height_km:.1f} km\n"
+            f"$\\lambda_{{\\rm mfp}}$ = {mfp.format_mean_free_path(peak_mean_free_path_m)}\n"
+            f"$\\tau$ = {fit_result['tau_s']:.2f} $\\pm$ {fit_result['tau_2sigma_s']:.2f} s (2$\\sigma$)\n"
+            f"$R_{{\\rm tx}}$ = {range_info['r_tx_km']:.1f} km\n"
+            f"$R_{{\\rm rx}}$ = {range_info['r_rx_km']:.1f} km"
+        ),
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=7,
+        bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.5, "pad": 2.0},
+    )
+
+    if created_fig:
+        fig.autofmt_xdate(rotation=30, ha="right")
+
+    if created_fig and output_filename is not None:
+        fig.savefig(output_filename, bbox_inches="tight")
+        print(f"Saved peak-gate RCS PDF: {output_filename}")
+
+    if created_fig and show:
+        plt.show()
+    elif created_fig:
+        plt.close(fig)
+
+    return {
+        "times_datetime64": times_plot,
+        "snr_db": snr_db[gate_idx, :],
+        "rcs_dbsm": rcs_dbsm,
+        "range_gate_index": gate_idx,
+        "range_gate_km": gate_range_km,
+        "peak_snr_db": peak_snr_db,
+        "peak_rcs_dbsm": peak_rcs_dbsm,
+        "peak_time_datetime64": peak_time_dt64,
+        "range_info": range_info,
+        "fit_result": fit_result,
+        "figure": fig,
+        "axes": ax,
+    }
+
+
 if __name__ == "__main__":
-    plot_decoded(tx="kborn", rx="hagenow")
+    plot_peak_snr_gate_timeseries(
+        tx="kborn",
+        rx="hagenow",
+        start_time="2025-02-19T03:46:01",
+        end_time="2025-02-19T03:46:12",
+        fit_start_time="2025-02-19T03:46:05",
+        fit_end_time="2025-02-19T03:46:07",
+        ylimits_db=(10, 70),
+    )
+
+    plot_decoded(
+        tx="kborn",
+        rx="hagenow",
+        start_time="2025-02-19T03:45:47",
+        end_time="2025-02-19T03:46:26",
+        ymin=215,
+        ymax=330,
+    )

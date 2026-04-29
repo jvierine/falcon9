@@ -46,10 +46,11 @@ def load_summary_cache(tx, rx):
         }
 
 
-def load_plot_grid(tx, rx):
-    summary = load_summary_cache(tx, rx)
-    if summary is not None:
-        return summary
+def load_plot_grid(tx, rx, use_summary_cache=False):
+    if use_summary_cache:
+        summary = load_summary_cache(tx, rx)
+        if summary is not None:
+            return summary
     return plot_deco.compute_rcs_grid(tx=tx, rx=rx)
 
 
@@ -112,6 +113,11 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--use-summary-cache",
+        action="store_true",
+        help="Use low-resolution cached S/N grids from simone/decoded_summaries for faster preview plots.",
+    )
+    parser.add_argument(
         "--show",
         action="store_true",
         help="Display the figure interactively after saving.",
@@ -125,6 +131,7 @@ def plot_all_links(
     min_range_km=100.0,
     max_range_km=600.0,
     panel_ranges_km=None,
+    use_summary_cache=False,
     output="rcs_all_links_fullpage.pdf",
     show=False,
 ):
@@ -138,7 +145,7 @@ def plot_all_links(
     global_vmin = -10.0
     global_vmax = None
     for (tx, rx), (panel_ymin, panel_ymax) in zip(links, panel_ranges_km):
-        decoded = load_plot_grid(tx=tx, rx=rx)
+        decoded = load_plot_grid(tx=tx, rx=rx, use_summary_cache=use_summary_cache)
         _, sn_plot_db = plot_deco._slice_time_window(
             decoded["times_datetime64"],
             decoded["sn_plus_n_over_n_db"],
@@ -162,7 +169,13 @@ def plot_all_links(
     if global_vmax is None:
         raise ValueError("No finite S/N + 1 values were found in the requested plotting window.")
 
-    print(f"Shared S/N + 1 color scale: vmin={global_vmin:.1f} dB, vmax={global_vmax:.2f} dB")
+    print(
+        f"Shared S/N + 1 color scale: vmin={global_vmin:.1f} dB, vmax={global_vmax:.2f} dB"
+    )
+    print(
+        "Data source: "
+        + ("summary cache (decimated)" if use_summary_cache else "full decoded data (native resolution)")
+    )
 
     rcparams = dict(plot_deco.publication_rcparams())
     rcparams.update(
@@ -189,7 +202,7 @@ def plot_all_links(
 
         mesh = None
         for idx, (((tx, rx), (panel_ymin, panel_ymax)), ax) in enumerate(zip(zip(links, panel_ranges_km), axes.flat)):
-            decoded = load_plot_grid(tx=tx, rx=rx)
+            decoded = load_plot_grid(tx=tx, rx=rx, use_summary_cache=use_summary_cache)
             result = plot_deco.plot_decoded(
                 tx=tx,
                 rx=rx,
@@ -206,6 +219,8 @@ def plot_all_links(
                 vmin=global_vmin,
                 vmax=global_vmax,
                 precomputed_grid=decoded,
+                overlay_predicted_range=True,
+                show_aspect_axis=False,
             )
             if mesh is None:
                 mesh = result["mesh"]
@@ -262,6 +277,7 @@ def main():
         min_range_km=args.min_range_km,
         max_range_km=args.max_range_km,
         panel_ranges_km=args.panel_ranges,
+        use_summary_cache=args.use_summary_cache,
         output=args.output,
         show=args.show,
     )
