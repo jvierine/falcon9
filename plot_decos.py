@@ -46,12 +46,25 @@ def load_summary_cache(tx, rx):
         }
 
 
-def load_plot_grid(tx, rx, use_summary_cache=False):
+def load_plot_grid(tx, rx, use_summary_cache=False, time_smooth_samples=None, time_smooth_kernel=None):
+    """Load decoded grid for plotting.
+
+    If use_summary_cache is True and a summary exists, return it. Otherwise
+    compute the full decoded grid. Optional smoothing parameters are forwarded
+    to compute_rcs_grid when computing the full grid. For summary-cache data
+    smoothing (if requested) is applied later in `plot_all_links` where the
+    cached dB grid is available.
+    """
     if use_summary_cache:
         summary = load_summary_cache(tx, rx)
         if summary is not None:
             return summary
-    return plot_deco.compute_rcs_grid(tx=tx, rx=rx)
+    return plot_deco.compute_rcs_grid(
+        tx=tx,
+        rx=rx,
+        time_smooth_samples=time_smooth_samples,
+        time_smooth_kernel=time_smooth_kernel,
+    )
 
 
 def parse_panel_ranges(value):
@@ -134,6 +147,9 @@ def plot_all_links(
     use_summary_cache=False,
     output="rcs_all_links_fullpage.pdf",
     show=False,
+    # optional time averaging (linear SN) applied before converting to dB
+    time_smooth_samples=5,
+    time_smooth_kernel=None,
 ):
     panel_labels = "abcdefgh"
     links = plot_deco.DEFAULT_RCS_LINKS
@@ -142,10 +158,38 @@ def plot_all_links(
     if len(panel_ranges_km) != len(links):
         raise ValueError("panel_ranges_km must have one (ymin, ymax) tuple per link.")
 
-    global_vmin = -10.0
+    global_vmin = -20.0
     global_vmax = None
     for (tx, rx), (panel_ymin, panel_ymax) in zip(links, panel_ranges_km):
-        decoded = load_plot_grid(tx=tx, rx=rx, use_summary_cache=use_summary_cache)
+        decoded = load_plot_grid(
+            tx=tx,
+            rx=rx,
+            use_summary_cache=use_summary_cache,
+            time_smooth_samples=time_smooth_samples if not use_summary_cache else None,
+            time_smooth_kernel=time_smooth_kernel if not use_summary_cache else None,
+        )
+        # If we loaded a summary cache it contains dB values only; if the user
+        # requested smoothing we need to operate on linear SN before converting
+        # back to dB. For full decoded data, smoothing has already been applied
+        # inside compute_rcs_grid when load_plot_grid forwarded the smoothing
+        # parameters.
+        if use_summary_cache and (time_smooth_kernel is not None or (time_smooth_samples is not None and int(time_smooth_samples) > 1)):
+            # build kernel
+            if time_smooth_kernel is None:
+                kernel = np.repeat(1.0 / float(time_smooth_samples), int(time_smooth_samples))
+            else:
+                kernel = np.asarray(time_smooth_kernel, dtype=float)
+
+            # operate on linear SN (S+N)/N
+            sn_db = decoded["sn_plus_n_over_n_db"]
+            sn_lin = 10.0 ** (sn_db / 10.0)
+            sn_smoothed = np.empty_like(sn_lin)
+            for ir in range(sn_lin.shape[0]):
+                sn_smoothed[ir, :] = np.convolve(sn_lin[ir, :], kernel, mode="same")
+            # convert back to dB and replace the array used for plotting
+            decoded = dict(decoded)
+            decoded["sn_plus_n_over_n_db"] = 10.0 * np.log10(np.maximum(sn_smoothed, 1e-12))
+
         _, sn_plot_db = plot_deco._slice_time_window(
             decoded["times_datetime64"],
             decoded["sn_plus_n_over_n_db"],
@@ -202,7 +246,13 @@ def plot_all_links(
 
         mesh = None
         for idx, (((tx, rx), (panel_ymin, panel_ymax)), ax) in enumerate(zip(zip(links, panel_ranges_km), axes.flat)):
-            decoded = load_plot_grid(tx=tx, rx=rx, use_summary_cache=use_summary_cache)
+            decoded = load_plot_grid(
+                tx=tx,
+                rx=rx,
+                use_summary_cache=use_summary_cache,
+                time_smooth_samples=time_smooth_samples if not use_summary_cache else None,
+                time_smooth_kernel=time_smooth_kernel if not use_summary_cache else None,
+            )
             result = plot_deco.plot_decoded(
                 tx=tx,
                 rx=rx,

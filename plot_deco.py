@@ -234,10 +234,36 @@ def compute_snr_from_power(power):
     return power / noise_floor[None, :]
 
 
-def compute_rcs_grid(tx="jruh", rx="bornim"):
+def compute_rcs_grid(tx="jruh", rx="bornim", time_smooth_samples=None, time_smooth_kernel=None):
     decoded = load_decoded_power(tx=tx, rx=rx)
     snr = compute_snr_from_power(decoded["power"])
     range_km = n.asarray(decoded["range_km"], dtype=float)
+
+    # Keep a copy of raw SN for debugging/inspection
+    decoded["snr_raw"] = snr.copy()
+
+    # Build smoothing kernel if requested. Default: no smoothing unless samples provided.
+    if time_smooth_kernel is None and time_smooth_samples is not None and int(time_smooth_samples) > 1:
+        kernel = n.repeat(1.0 / float(time_smooth_samples), int(time_smooth_samples))
+    elif time_smooth_kernel is not None:
+        kernel = n.asarray(time_smooth_kernel, dtype=float)
+    else:
+        kernel = None
+
+    if kernel is not None:
+        # Ensure snr is 2D (n_range, n_time)
+        try:
+            n_range, n_time = snr.shape
+        except Exception:
+            kernel = None
+
+    if kernel is not None:
+        smoothed = n.empty_like(snr)
+        for ir in range(snr.shape[0]):
+            row = n.asarray(snr[ir, :], dtype=float)
+            # use np.convolve (n.convolve) with mode='same' to avoid time shift
+            smoothed[ir, :] = n.convolve(row, kernel, mode="same")
+        snr = smoothed
 
     r_tx = n.broadcast_to((0.5 * range_km[:, None]) * 1e3, snr.shape)
     rcs = sn_plus_n_over_n_to_rcs(
@@ -518,14 +544,31 @@ def plot_decoded(
     show_aspect_axis=True,
     aspect_time_shift_s=-1.0,
     aspect_tick_values=(130, 110, 90, 70, 50),
+    # optional running-mean smoothing in time per range gate
+    time_smooth_samples=20,
+    time_smooth_kernel=None,
 ):
-    decoded = compute_rcs_grid(tx=tx, rx=rx) if precomputed_grid is None else precomputed_grid
+    # If caller did not provide a precomputed grid, compute it here.
+    # Forward optional smoothing parameters into compute_rcs_grid so smoothing happens
+    # on the SN time-series before converting to RCS.
+    if precomputed_grid is None:
+        decoded = compute_rcs_grid(
+            tx=tx,
+            rx=rx,
+            time_smooth_samples=time_smooth_samples,
+            time_smooth_kernel=time_smooth_kernel,
+        )
+    else:
+        decoded = precomputed_grid
     times_plot, rcs_dbsm = _slice_time_window(
         decoded["times_datetime64"],
         decoded[field_name],
         start_time=start_time,
         end_time=end_time,
     )
+
+    # Smoothing is now applied inside compute_rcs_grid on the SN time-series
+    # before conversion to RCS. No further smoothing is required here.
 
     created_fig = ax is None
     if created_fig:
@@ -557,7 +600,7 @@ def plot_decoded(
             color="white",
             linestyle="--",
             linewidth=1.0,
-            alpha=0.75,
+            alpha=0.4,
             zorder=5,
         )
     ax.set_ylim(ymin, ymax)
