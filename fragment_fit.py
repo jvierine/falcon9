@@ -7,9 +7,17 @@ import fit_ballistic3 as fb3
 
 import plot_fragments as pf
 
-B0_GUESS = [-3, -3, -3]
+B0_GUESS = [-3, -3, -3, -3]
 DEBUG_PLOT = True
-DEBUG_PLOT_EVERY = 100
+DEBUG_PLOT_EVERY = 10
+TERMINAL_WEIGHT = 4.0
+TERMINAL_WEIGHT_SECONDS = 25.0
+TERMINAL_WEIGHT_BY_PATH = {
+    ("5", "1"): (20.0, 90.0),
+}
+IGNORE_INITIAL_SECONDS_BY_FRAGMENT = {
+    "2": 15.0,
+}
 
 
 def merge_parent_measurements(merge_ids,fragment_times,fragment_pos,fragment_pos_err,fragment_ids):
@@ -50,6 +58,19 @@ def merge_parent_measurements(merge_ids,fragment_times,fragment_pos,fragment_pos
         times = times[order]
         pos = pos[order, :]
         pos_err = pos_err[order]
+
+        ignore_initial_seconds = IGNORE_INITIAL_SECONDS_BY_FRAGMENT.get(str(fid))
+        if ignore_initial_seconds is not None and len(times) > 0:
+            keep = times >= times[0] + float(ignore_initial_seconds)
+            n_ignored = int(np.count_nonzero(~keep))
+            if n_ignored > 0:
+                print(
+                    "ignoring first %.1f s of fragment %s: dropped %d measurements"
+                    % (float(ignore_initial_seconds), fid, n_ignored)
+                )
+            times = times[keep]
+            pos = pos[keep, :]
+            pos_err = pos_err[keep]
 
         if len(times) == 0:
             continue
@@ -210,12 +231,18 @@ for merge_ids in merge_ids_all:
     fig = plot_merged_measurements_lon_alt(",".join(merge_ids), fragment_geo_pos, merged_times, merged_pos, merged_chain)
     plt.close(fig)
 
+    terminal_weight, terminal_weight_seconds = TERMINAL_WEIGHT_BY_PATH.get(
+        tuple(merged_chain),
+        (TERMINAL_WEIGHT, TERMINAL_WEIGHT_SECONDS),
+    )
     path_specs.append(
         {
             "fragment_times": merged_times,
             "fragment_pos": merged_pos,
             "fragment_pos_err": merged_pos_err,
             "fit_ids": merged_chain,
+            "terminal_weight": terminal_weight,
+            "terminal_weight_seconds": terminal_weight_seconds,
             "initial_hdf5_path": str(
                 fb3.build_fit_result_hdf5_path(
                     merged_chain,
@@ -234,4 +261,5 @@ joint_second_pass = fb3.fit_multiple_paths_shared_start_ballistic_coefficient(
     debug_plot=DEBUG_PLOT,
     debug_plot_every=DEBUG_PLOT_EVERY,
     verbose=1,
+    refine_existing_hdf5_only=True,
 )

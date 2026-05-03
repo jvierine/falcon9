@@ -16,6 +16,9 @@ WGS84_F = 1.0 / 298.257223563
 WGS84_B = WGS84_A * (1.0 - WGS84_F)
 WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
 WGS84_EP2 = (WGS84_A**2 - WGS84_B**2) / WGS84_B**2
+DEFAULT_MSIS_F107 = 150.0
+DEFAULT_MSIS_F107A = 150.0
+DEFAULT_MSIS_AP = 4.0
 
 
 def load_recovered_fragments():
@@ -212,6 +215,8 @@ def prepare_fragment_fit_data(
     fragment_pos_err,
     fragment_times,
     fit_ids,
+    terminal_weight=1.0,
+    terminal_weight_seconds=0.0,
 ):
     t = n.asarray(fragment_times, dtype=float).reshape(-1)
     pos_ecef = n.asarray(fragment_pos, dtype=float)
@@ -235,9 +240,17 @@ def prepare_fragment_fit_data(
     dt_obs = t[-1] - t[0]
     if dt_obs <= 0.0:
         raise ValueError("Need observations spanning a non-zero time interval.")
-    v0_guess_ecef = (pos_ecef[-1, :] - pos_ecef[0, :]) / dt_obs
+    v0_guess_ecef = estimate_initial_velocity_ecef(t, pos_ecef)
 
     pos_eci = ecef_to_eci_position(pos_ecef, t)
+    residual_weights = n.ones(t.shape, dtype=float)
+    terminal_weight = float(terminal_weight)
+    terminal_weight_seconds = float(terminal_weight_seconds)
+    if terminal_weight > 1.0 and terminal_weight_seconds > 0.0:
+        terminal_start = float(t[-1] - terminal_weight_seconds)
+        ramp = n.clip((t - terminal_start) / terminal_weight_seconds, 0.0, 1.0)
+        residual_weights = 1.0 + (terminal_weight - 1.0) * ramp
+
     density_profile = build_msis_density_profile(t, pos_ecef)
     p0_guess_eci, v0_guess_eci = ecef_to_eci_state(
         p0_guess_ecef,
@@ -253,6 +266,7 @@ def prepare_fragment_fit_data(
         "pos_ecef": pos_ecef,
         "pos_ecef_err": pos_ecef_err,
         "pos_eci": pos_eci,
+        "residual_weights": residual_weights,
         "fit_ids": fit_ids,
         "root_fragment_id": shared_start_id,
         "shared_start_id": shared_start_id,
@@ -278,7 +292,10 @@ def get_msis_density(times_unix, lat_deg, lon_deg, alt_m):
             n.array([lat_deg[j]]),
             n.array([lon_deg[j]]),
             n.array([alt_m[j] / 1e3]),   # km
-            geomagnetic_activity=-1
+            f107s=DEFAULT_MSIS_F107,
+            f107as=DEFAULT_MSIS_F107A,
+            aps=n.full((1, 7), DEFAULT_MSIS_AP, dtype=float),
+            geomagnetic_activity=-1,
         )
 
         arr = n.asarray(data)
@@ -306,6 +323,39 @@ def circular_mean_deg(angle_deg):
     return float(n.rad2deg(n.angle(n.mean(n.exp(1j * angle_rad)))))
 
 
+def estimate_initial_velocity_ecef(times_unix, pos_ecef, max_initial_span_s=12.0, min_points=6):
+    """
+    Estimate the initial velocity from the first few position measurements.
+
+    A whole-track first-to-last velocity can be biased when the fragment is
+    decelerating or when a merged path contains parent/child segments. For the
+    trajectory fit, the state vector is defined at the beginning of the fitted
+    interval, so the initial slope is the better starting point.
+    """
+    t = n.asarray(times_unix, dtype=float).reshape(-1)
+    pos = n.asarray(pos_ecef, dtype=float)
+    if t.size < 2 or pos.shape[0] != t.size:
+        raise ValueError("Need matching time and position samples.")
+
+    dt_total = t[-1] - t[0]
+    if dt_total <= 0.0:
+        raise ValueError("Need observations spanning a non-zero time interval.")
+
+    use = t <= t[0] + float(max_initial_span_s)
+    if n.count_nonzero(use) < int(min_points):
+        use = n.zeros(t.shape, dtype=bool)
+        use[: min(int(min_points), t.size)] = True
+
+    if n.count_nonzero(use) < 2:
+        return (pos[-1, :] - pos[0, :]) / dt_total
+
+    t_fit = t[use] - t[0]
+    pos_fit = pos[use, :]
+    design = n.column_stack((n.ones(t_fit.shape), t_fit))
+    coeffs, _, _, _ = n.linalg.lstsq(design, pos_fit, rcond=None)
+    return n.asarray(coeffs[1, :], dtype=float)
+
+
 def build_msis_density_profile(times_unix, pos_ecef, n_altitude=512, min_top_alt_m=300e3, alt_pad_m=50e3):
     """
     Build a 1D density profile rho(h) using a single MSIS call at the mean
@@ -329,12 +379,18 @@ def build_msis_density_profile(times_unix, pos_ecef, n_altitude=512, min_top_alt
     time_grid = n.full_like(altitude_grid_m, ref_time_unix, dtype=float).astype("datetime64[s]")
     lat_grid = n.full_like(altitude_grid_m, ref_lat_deg, dtype=float)
     lon_grid = n.full_like(altitude_grid_m, ref_lon_deg, dtype=float)
+    f107_grid = n.full(altitude_grid_m.size, DEFAULT_MSIS_F107, dtype=float)
+    f107a_grid = n.full(altitude_grid_m.size, DEFAULT_MSIS_F107A, dtype=float)
+    ap_grid = n.full((altitude_grid_m.size, 7), DEFAULT_MSIS_AP, dtype=float)
 
     data = msis.run(
         time_grid,
         lat_grid,
         lon_grid,
         altitude_grid_m / 1e3,
+        f107s=f107_grid,
+        f107as=f107a_grid,
+        aps=ap_grid,
         geomagnetic_activity=-1,
     )
     rho_grid = _extract_msis_total_density(data)
@@ -1172,14 +1228,6 @@ def plot_ballistic_fit(result, show=True):
 
     plot_all_fragment_background(ax_map, context_geo, panel="map")
     plot_all_fragment_background(ax_time, context_geo, context_times=context_times, t0=t0, panel="time")
-    plot_all_fragment_background(
-        ax_B,
-        context_geo,
-        context_times=context_times,
-        t0=t0,
-        panel="B",
-        B_interp=model["B_interp"],
-    )
     plot_all_fragment_background(ax_lonalt, context_geo, panel="lonalt")
 
     sample_label_used = False
@@ -1245,15 +1293,6 @@ def plot_ballistic_fit(result, show=True):
             markeredgewidth=0.8,
             label="Recovered fragment" if i == 0 else None,
             zorder=16,
-        )
-        ax_map.text(
-            lon_frag + 0.02,
-            lat_frag + 0.02,
-            frag_id,
-            fontsize=annotation_fontsize,
-            ha="left",
-            va="bottom",
-            zorder=17,
         )
     ax_map.set_xlabel("Longitude (deg)", fontsize=axis_label_fontsize)
     ax_map.set_ylabel("Latitude (deg)", fontsize=axis_label_fontsize)
@@ -1404,7 +1443,7 @@ def plot_ballistic_fit(result, show=True):
             color=model_color,
             zorder=10,
         )
-    for ax in (ax_map, ax_time, ax_B, ax_lonalt):
+    for ax in (ax_map, ax_B, ax_lonalt):
         ax.legend(
             frameon=True,
             framealpha=0.95,
@@ -1446,7 +1485,7 @@ def update_debug_fit_plot(debug_state, measurement_traces, model_traces, stage_n
         return debug_state
 
     n_panels = max(len(measurement_traces), 1)
-    ncols = 2 if n_panels > 1 else 1
+    ncols = min(3, n_panels)
     nrows = int(n.ceil(n_panels / ncols))
 
     fig = debug_state.get("fig")
@@ -1460,7 +1499,7 @@ def update_debug_fit_plot(debug_state, measurement_traces, model_traces, stage_n
         fig, axes = plt.subplots(
             nrows,
             ncols,
-            figsize=(6.5 * ncols, 3.8 * nrows),
+            figsize=(min(14.0, 4.6 * ncols), min(8.5, 2.6 * nrows)),
             squeeze=False,
             constrained_layout=True,
         )
@@ -1733,7 +1772,7 @@ def propagate(
     p = n.asarray(p0, dtype=float).copy()
     v = n.asarray(v0, dtype=float).copy()
     if start_time is None:
-        tnow = n.min(t) - dt
+        tnow = n.min(t)
     else:
         tnow = float(start_time)
     pos_eci = []
@@ -2051,7 +2090,16 @@ def build_model_from_parameters(x, t, dt_model, density_profile=None, wind_model
     return model
 
 
-def residuals_lm(x, t, pos_eci, dt_model, gamma_fixed, density_profile=None, wind_model=None):
+def residuals_lm(
+    x,
+    t,
+    pos_eci,
+    dt_model,
+    gamma_fixed,
+    density_profile=None,
+    wind_model=None,
+    residual_weights=None,
+):
     bad = n.full(pos_eci.size, 1e9, dtype=float)
 
     if not n.all(n.isfinite(x)):
@@ -2075,6 +2123,11 @@ def residuals_lm(x, t, pos_eci, dt_model, gamma_fixed, density_profile=None, win
     residuals = model_pos - pos_eci
     if not n.all(n.isfinite(residuals)):
         return bad
+    if residual_weights is not None:
+        weights = n.asarray(residual_weights, dtype=float).reshape(-1)
+        if weights.shape[0] != residuals.shape[0]:
+            return bad
+        residuals = residuals * n.sqrt(n.maximum(weights, 0.0))[:, None]
 
     return residuals.ravel()
 
@@ -2321,16 +2374,53 @@ def run_fmin_fit_stage(
     }
 
 
-def joint_shared_start_parameter_step_sizes(n_groups, n_paths, n_ballistic_nodes):
-    group_width = 7  # shared p0(3), v0(3), log_B0
+def joint_shared_start_parameter_step_sizes(
+    n_groups,
+    n_paths,
+    n_ballistic_nodes,
+    fixed_start_positions=None,
+):
+    group_width = 4 if fixed_start_positions is not None else 7
     local_width = max(int(n_ballistic_nodes) - 1, 0)  # path-specific remaining log_B nodes
     steps = n.full(group_width * n_groups + local_width * n_paths, 1e-3, dtype=float)
     for i in range(n_groups):
         base = group_width * i
-        steps[base:base + 3] = 10.0
-        steps[base + 3:base + 6] = 0.1
-        steps[base + 6] = 1e-3
+        if fixed_start_positions is None:
+            steps[base:base + 3] = 10.0
+            steps[base + 3:base + 6] = 0.1
+            steps[base + 6] = 1e-3
+        else:
+            steps[base:base + 3] = 0.1
+            steps[base + 3] = 1e-3
     return steps
+
+
+def joint_shared_start_parameter_bounds(
+    n_groups,
+    n_paths,
+    n_ballistic_nodes,
+    fixed_start_positions=None,
+    log_B_bounds=(-6.0, -1.5),
+):
+    group_width = 4 if fixed_start_positions is not None else 7
+    local_width = max(int(n_ballistic_nodes) - 1, 0)
+    lower = n.full(group_width * n_groups + local_width * n_paths, -n.inf, dtype=float)
+    upper = n.full(group_width * n_groups + local_width * n_paths, n.inf, dtype=float)
+    log_B_lower, log_B_upper = (float(log_B_bounds[0]), float(log_B_bounds[1]))
+
+    for i in range(n_groups):
+        base = group_width * i
+        log_B_index = base + (3 if fixed_start_positions is not None else 6)
+        lower[log_B_index] = log_B_lower
+        upper[log_B_index] = log_B_upper
+
+    local_base0 = group_width * n_groups
+    for path_index in range(n_paths):
+        local_base = local_base0 + local_width * path_index
+        lower[local_base:local_base + local_width] = log_B_lower
+        upper[local_base:local_base + local_width] = log_B_upper
+
+    return lower, upper
 
 
 def joint_shared_start_group_order(prepared_paths):
@@ -2342,13 +2432,29 @@ def joint_shared_start_group_order(prepared_paths):
     return tuple(group_order)
 
 
-def joint_shared_start_decode_local_x(x, path_index, prepared_path, group_index, n_groups, n_ballistic_nodes):
+def joint_shared_start_decode_local_x(
+    x,
+    path_index,
+    prepared_path,
+    group_index,
+    n_groups,
+    n_ballistic_nodes,
+    fixed_start_positions=None,
+):
     x = n.asarray(x, dtype=float)
-    group_base = 7 * group_index[prepared_path["shared_start_id"]]
+    group_width = 4 if fixed_start_positions is not None else 7
+    group_base = group_width * group_index[prepared_path["shared_start_id"]]
     local_width = max(int(n_ballistic_nodes) - 1, 0)
-    local_base = 7 * n_groups + local_width * path_index
-    shared_state = x[group_base:group_base + 6]
-    shared_log_B0 = x[group_base + 6]
+    local_base = group_width * n_groups + local_width * path_index
+    if fixed_start_positions is None:
+        shared_state = x[group_base:group_base + 6]
+        shared_log_B0 = x[group_base + 6]
+    else:
+        shared_start_id = prepared_path["shared_start_id"]
+        p0_fixed = n.asarray(fixed_start_positions[shared_start_id], dtype=float).reshape(3)
+        v0_shared = x[group_base:group_base + 3]
+        shared_state = n.concatenate((p0_fixed, v0_shared))
+        shared_log_B0 = x[group_base + 3]
     return n.concatenate(
         (
             shared_state,
@@ -2362,14 +2468,32 @@ def joint_shared_start_decode_local_x(x, path_index, prepared_path, group_index,
     )
 
 
-def joint_shared_start_extract_local_covariance(covariance, path_index, prepared_path, group_index, n_groups, n_ballistic_nodes):
+def joint_shared_start_extract_local_covariance(
+    covariance,
+    path_index,
+    prepared_path,
+    group_index,
+    n_groups,
+    n_ballistic_nodes,
+    fixed_start_positions=None,
+):
     if covariance is None:
         return None
-    group_base = 7 * group_index[prepared_path["shared_start_id"]]
+    group_width = 4 if fixed_start_positions is not None else 7
+    group_base = group_width * group_index[prepared_path["shared_start_id"]]
     local_width = max(int(n_ballistic_nodes) - 1, 0)
-    local_base = 7 * n_groups + local_width * path_index
-    idx = list(range(group_base, group_base + 7)) + list(range(local_base, local_base + local_width))
-    return covariance[n.ix_(idx, idx)]
+    local_base = group_width * n_groups + local_width * path_index
+    if fixed_start_positions is None:
+        idx = list(range(group_base, group_base + 7)) + list(range(local_base, local_base + local_width))
+        return covariance[n.ix_(idx, idx)]
+
+    idx = list(range(group_base, group_base + 4)) + list(range(local_base, local_base + local_width))
+    variable_covariance = covariance[n.ix_(idx, idx)]
+    full_width = 6 + int(n_ballistic_nodes)
+    full_covariance = n.zeros((full_width, full_width), dtype=float)
+    variable_local_idx = list(range(3, 7 + local_width))
+    full_covariance[n.ix_(variable_local_idx, variable_local_idx)] = variable_covariance
+    return full_covariance
 
 
 def run_joint_shared_start_fmin_stage(
@@ -2384,6 +2508,8 @@ def run_joint_shared_start_fmin_stage(
     debug_plot=False,
     debug_plot_every=100,
     verbose=0,
+    fixed_start_positions=None,
+    skip_fmin=False,
 ):
     n_paths = len(prepared_paths)
     n_groups = len(shared_start_order)
@@ -2422,6 +2548,7 @@ def run_joint_shared_start_fmin_stage(
                 group_index,
                 n_groups,
                 n_ballistic_nodes,
+                fixed_start_positions=fixed_start_positions,
             )
             residuals.append(
                 residuals_lm(
@@ -2432,6 +2559,7 @@ def run_joint_shared_start_fmin_stage(
                     gamma_fixed,
                     density_profile=path["density_profile"],
                     wind_model=wind_model,
+                    residual_weights=path.get("residual_weights"),
                 )
             )
         return n.concatenate(residuals)
@@ -2457,6 +2585,7 @@ def run_joint_shared_start_fmin_stage(
                             group_index,
                             n_groups,
                             n_ballistic_nodes,
+                            fixed_start_positions=fixed_start_positions,
                         )
                         best_model = build_model_from_parameters(
                             local_best_x,
@@ -2486,14 +2615,106 @@ def run_joint_shared_start_fmin_stage(
             print(cost)
         return cost
 
-    xopt, fopt, iterations, funcalls, warnflag = so.fmin(
-        objective_joint,
-        n.asarray(x0, dtype=float),
-        full_output=True,
-        maxiter=max(8000, 3000 * n_paths),
-        maxfun=max(10000, 4000 * n_paths),
-        disp=bool(verbose > 1),
-    )
+    if skip_fmin:
+        if verbose > 0:
+            print("skipping fmin stage; refining existing fit with bounded least_squares")
+        xopt = n.asarray(x0, dtype=float).copy()
+        fopt = float(n.sum(residuals_joint(xopt) ** 2))
+        iterations = 0
+        funcalls = 1
+        warnflag = 0
+        method = "least_squares_joint"
+    else:
+        xopt, fopt, iterations, funcalls, warnflag = so.fmin(
+            objective_joint,
+            n.asarray(x0, dtype=float),
+            full_output=True,
+            maxiter=max(8000, 3000 * n_paths),
+            maxfun=max(10000, 4000 * n_paths),
+            disp=bool(verbose > 1),
+        )
+        method = "fmin_joint"
+    ls_nfev = 0
+    ls_success = False
+    ls_message = ""
+    try:
+        lower_bounds, upper_bounds = joint_shared_start_parameter_bounds(
+            n_groups,
+            n_paths,
+            n_ballistic_nodes,
+            fixed_start_positions=fixed_start_positions,
+        )
+        xopt = n.minimum(n.maximum(n.asarray(xopt, dtype=float), lower_bounds), upper_bounds)
+        x_scale = n.maximum(n.abs(xopt), 1.0)
+
+        def residuals_joint_least_squares(x):
+            residual_vector = residuals_joint(x)
+            cost = float(n.sum(residual_vector**2))
+            debug_state["eval_count"] = int(debug_state.get("eval_count", 0)) + 1
+            if n.isfinite(cost) and cost < float(debug_state.get("best_cost", n.inf)):
+                debug_state["best_cost"] = float(cost)
+                debug_state["best_x"] = n.asarray(x, dtype=float).copy()
+            every = max(int(debug_state.get("every", 100)), 1)
+            if debug_state.get("enabled", False) and debug_state["eval_count"] % every == 0:
+                try:
+                    model_traces = []
+                    for i, (path, wind_model) in enumerate(zip(prepared_paths, wind_models)):
+                        local_x = joint_shared_start_decode_local_x(
+                            x,
+                            i,
+                            path,
+                            group_index,
+                            n_groups,
+                            n_ballistic_nodes,
+                            fixed_start_positions=fixed_start_positions,
+                        )
+                        model = build_model_from_parameters(
+                            local_x,
+                            path["times_unix"],
+                            dt_model,
+                            density_profile=path["density_profile"],
+                            wind_model=wind_model,
+                        )
+                        model_traces.append(
+                            {
+                                "label": " -> ".join(path["fit_ids"]),
+                                "lon_deg": n.asarray(model["lon_deg"], dtype=float),
+                                "hgt_km": n.asarray(model["hgt_m"], dtype=float) / 1e3,
+                            }
+                        )
+                    update_debug_fit_plot(
+                        debug_state,
+                        debug_measurements,
+                        model_traces,
+                        "%s least_squares" % stage_name,
+                        debug_state["eval_count"],
+                        cost,
+                    )
+                except Exception:
+                    pass
+            return residual_vector
+
+        ls_result = so.least_squares(
+            residuals_joint_least_squares,
+            xopt,
+            bounds=(lower_bounds, upper_bounds),
+            x_scale=x_scale,
+            loss="soft_l1",
+            f_scale=1000.0,
+            max_nfev=max(2000, 700 * n.asarray(xopt).size),
+            verbose=0,
+        )
+        ls_nfev = int(ls_result.nfev)
+        ls_success = bool(ls_result.success)
+        ls_message = str(ls_result.message)
+        ls_cost_sum = float(n.sum(residuals_joint(ls_result.x) ** 2))
+        if n.isfinite(ls_cost_sum) and ls_cost_sum <= float(n.sum(residuals_joint(xopt) ** 2)):
+            xopt = n.asarray(ls_result.x, dtype=float)
+            fopt = ls_cost_sum
+            warnflag = 0 if ls_success else warnflag
+            method = "fmin_then_least_squares_joint"
+    except Exception as exc:
+        ls_message = "least_squares refinement failed: %s" % (exc,)
 
     if debug_state.get("enabled", False):
         try:
@@ -2506,6 +2727,7 @@ def run_joint_shared_start_fmin_stage(
                     group_index,
                     n_groups,
                     n_ballistic_nodes,
+                    fixed_start_positions=fixed_start_positions,
                 )
                 final_model = build_model_from_parameters(
                     local_x,
@@ -2536,7 +2758,12 @@ def run_joint_shared_start_fmin_stage(
     residual_jac = finite_difference_jacobian(
         residuals_joint,
         xopt,
-        joint_shared_start_parameter_step_sizes(n_groups, n_paths, n_ballistic_nodes),
+        joint_shared_start_parameter_step_sizes(
+            n_groups,
+            n_paths,
+            n_ballistic_nodes,
+            fixed_start_positions=fixed_start_positions,
+        ),
     )
     covariance_info = estimate_parameter_covariance(residual_jac, residual_vector)
 
@@ -2550,6 +2777,7 @@ def run_joint_shared_start_fmin_stage(
             group_index,
             n_groups,
             n_ballistic_nodes,
+            fixed_start_positions=fixed_start_positions,
         )
         local_xs.append(local_x)
         models.append(
@@ -2563,14 +2791,17 @@ def run_joint_shared_start_fmin_stage(
         )
 
     optimizer = {
-        "method": "fmin_joint",
+        "method": method,
         "stage": str(stage_name),
         "x": n.asarray(xopt, dtype=float).copy(),
         "fun": float(fopt),
         "nit": int(iterations),
-        "nfev": int(funcalls),
+        "nfev": int(funcalls) + int(ls_nfev),
         "warnflag": int(warnflag),
         "success": bool(warnflag == 0),
+        "least_squares_nfev": int(ls_nfev),
+        "least_squares_success": bool(ls_success),
+        "least_squares_message": str(ls_message),
     }
     return {
         "xopt": n.asarray(xopt, dtype=float).copy(),
@@ -2702,11 +2933,13 @@ def fit_multiple_paths_shared_start_ballistic_coefficient(
     gamma=0.5,
     B0_guess=[-3, -3, -3],
     plot_context_fragment_geo_pos=None,
-    use_initial_hdf5=False,
+    use_initial_hdf5=True,
     initial_filename_prefix="ballistic_fit_sharedstart",
     debug_plot=False,
     debug_plot_every=100,
     verbose=2,
+    fixed_start_position=True,
+    refine_existing_hdf5_only=False,
 ):
     if len(path_specs) == 0:
         raise ValueError("path_specs must contain at least one path")
@@ -2728,6 +2961,8 @@ def fit_multiple_paths_shared_start_ballistic_coefficient(
                 spec["fragment_pos_err"],
                 spec["fragment_times"],
                 spec["fit_ids"],
+                terminal_weight=spec.get("terminal_weight", 1.0),
+                terminal_weight_seconds=spec.get("terminal_weight_seconds", 0.0),
             )
         )
         initial_hdf5_path = None
@@ -2768,23 +3003,56 @@ def fit_multiple_paths_shared_start_ballistic_coefficient(
     group_initial_v0 = {shared_start_id: [] for shared_start_id in shared_start_order}
     group_initial_log_B0 = {shared_start_id: [] for shared_start_id in shared_start_order}
     group_paths = {shared_start_id: [] for shared_start_id in shared_start_order}
+    fixed_start_positions = None
+    if fixed_start_position:
+        fixed_start_positions = {}
+        for shared_start_id in shared_start_order:
+            root_path = None
+            for prepared_path in prepared_paths:
+                if (
+                    prepared_path["shared_start_id"] == shared_start_id
+                    and tuple(prepared_path["fit_ids"]) == (str(shared_start_id),)
+                ):
+                    root_path = prepared_path
+                    break
+            if root_path is None:
+                root_path = next(
+                    path for path in prepared_paths if path["shared_start_id"] == shared_start_id
+                )
+            fixed_start_positions[shared_start_id] = n.asarray(
+                root_path["p0_guess_eci"],
+                dtype=float,
+            ).reshape(3)
     x0_parts = []
 
     local_initials = []
+    initial_source_used = []
     for prepared_path, initial_source in zip(prepared_paths, initial_sources):
+        used_initial_source = False
         if initial_source is not None:
             p0_init = n.asarray(initial_source["p0_hat_eci"], dtype=float).reshape(3)
             v0_init = n.asarray(initial_source["v0_hat_eci"], dtype=float).reshape(3)
             B_init = n.asarray(initial_source["B0_hat"], dtype=float).reshape(-1)
             if B_init.size != n_ballistic_nodes:
-                raise ValueError(
-                    "initial fit source must contain %d B0_hat values, got %d."
-                    % (n_ballistic_nodes, B_init.size)
-                )
+                if verbose > 0:
+                    print(
+                        "ignoring incompatible restart for %s: expected %d B0_hat values, got %d"
+                        % (
+                            " -> ".join(str(fid) for fid in prepared_path["fit_ids"]),
+                            n_ballistic_nodes,
+                            B_init.size,
+                        )
+                    )
+                p0_init = prepared_path["p0_guess_eci"]
+                v0_init = prepared_path["v0_guess_eci"]
+                B_init = B0_guess.copy()
+            else:
+                used_initial_source = True
         else:
             p0_init = prepared_path["p0_guess_eci"]
             v0_init = prepared_path["v0_guess_eci"]
             B_init = B0_guess.copy()
+        initial_source_used.append(used_initial_source)
 
         group_initial_p0[prepared_path["shared_start_id"]].append(n.asarray(p0_init, dtype=float).copy())
         group_initial_v0[prepared_path["shared_start_id"]].append(n.asarray(v0_init, dtype=float).copy())
@@ -2804,24 +3072,36 @@ def fit_multiple_paths_shared_start_ballistic_coefficient(
             exemplar_path = next(
                 path for path in prepared_paths if path["shared_start_id"] == shared_start_id
             )
-            x0_parts.extend(n.asarray(exemplar_path["p0_guess_eci"], dtype=float).tolist())
             x0_parts.extend(n.asarray(exemplar_path["v0_guess_eci"], dtype=float).tolist())
             x0_parts.append(float(B0_guess[0]))
         else:
-            x0_parts.extend(n.mean(n.vstack(p0_values), axis=0).tolist())
             x0_parts.extend(n.mean(n.vstack(v0_values), axis=0).tolist())
             x0_parts.append(float(n.mean(log_B0_values)))
+        if not fixed_start_position:
+            if len(p0_values) == 0:
+                p0_init = n.asarray(exemplar_path["p0_guess_eci"], dtype=float)
+            else:
+                p0_init = n.mean(n.vstack(p0_values), axis=0)
+            x0_parts[-4:-4] = p0_init.tolist()
 
     for local_init in local_initials:
         x0_parts.extend(local_init["log_B_rest"].tolist())
 
     x0 = n.asarray(x0_parts, dtype=float)
+    skip_fmin = bool(refine_existing_hdf5_only) and all(initial_source_used)
+    if refine_existing_hdf5_only and not skip_fmin and verbose > 0:
+        print("refine_existing_hdf5_only requested, but not all restart files are compatible; running fmin")
 
     if verbose > 0:
         print("shared start state and ballistic coefficient groups:")
         for shared_start_id in shared_start_order:
             members = group_paths[shared_start_id]
             print("  start fragment %s:" % (shared_start_id))
+            if fixed_start_positions is not None:
+                print(
+                    "    fixed p0 at first measurement ECI %s"
+                    % n.array2string(fixed_start_positions[shared_start_id], precision=3)
+                )
             for fit_ids in members:
                 print("    shares p0, v0, and B0 with path %s" % (" -> ".join(fit_ids)))
 
@@ -2837,6 +3117,8 @@ def fit_multiple_paths_shared_start_ballistic_coefficient(
         debug_plot=debug_plot,
         debug_plot_every=debug_plot_every,
         verbose=verbose,
+        fixed_start_positions=fixed_start_positions,
+        skip_fmin=skip_fmin,
     )
 
     zero_wind_models = zero_wind_stage["models"]
@@ -2889,6 +3171,8 @@ def fit_multiple_paths_shared_start_ballistic_coefficient(
             debug_plot=debug_plot,
             debug_plot_every=debug_plot_every,
             verbose=verbose,
+            fixed_start_positions=fixed_start_positions,
+            skip_fmin=skip_fmin,
         )
         final_stage = era5_stage
         final_wind_model_info = list(zero_wind_wind_model_info)
@@ -2905,6 +3189,7 @@ def fit_multiple_paths_shared_start_ballistic_coefficient(
                 final_stage["group_index"],
                 len(final_stage["shared_start_order"]),
                 n_ballistic_nodes,
+                fixed_start_positions=fixed_start_positions,
             )
             local_covariance_info = {
                 "covariance": local_covariance,
@@ -2934,16 +3219,28 @@ def fit_multiple_paths_shared_start_ballistic_coefficient(
     shared_start_v0_eci = {}
     shared_start_log_B0 = {}
     for shared_start_id in final_stage["shared_start_order"]:
-        group_base = 7 * final_stage["group_index"][shared_start_id]
-        shared_start_p0_eci[shared_start_id] = n.asarray(
-            final_stage["xopt"][group_base:group_base + 3],
-            dtype=float,
-        ).copy()
-        shared_start_v0_eci[shared_start_id] = n.asarray(
-            final_stage["xopt"][group_base + 3:group_base + 6],
-            dtype=float,
-        ).copy()
-        shared_start_log_B0[shared_start_id] = float(final_stage["xopt"][group_base + 6])
+        group_width = 4 if fixed_start_positions is not None else 7
+        group_base = group_width * final_stage["group_index"][shared_start_id]
+        if fixed_start_positions is None:
+            shared_start_p0_eci[shared_start_id] = n.asarray(
+                final_stage["xopt"][group_base:group_base + 3],
+                dtype=float,
+            ).copy()
+            shared_start_v0_eci[shared_start_id] = n.asarray(
+                final_stage["xopt"][group_base + 3:group_base + 6],
+                dtype=float,
+            ).copy()
+            shared_start_log_B0[shared_start_id] = float(final_stage["xopt"][group_base + 6])
+        else:
+            shared_start_p0_eci[shared_start_id] = n.asarray(
+                fixed_start_positions[shared_start_id],
+                dtype=float,
+            ).copy()
+            shared_start_v0_eci[shared_start_id] = n.asarray(
+                final_stage["xopt"][group_base:group_base + 3],
+                dtype=float,
+            ).copy()
+            shared_start_log_B0[shared_start_id] = float(final_stage["xopt"][group_base + 3])
     shared_start_B0 = {
         shared_start_id: float(10.0 ** shared_log_B0)
         for shared_start_id, shared_log_B0 in shared_start_log_B0.items()
@@ -3123,7 +3420,7 @@ def fit_shared_ballistic_coefficient(
     dt_obs = t[-1] - t[0]
     if dt_obs <= 0.0:
         raise ValueError("Need observations spanning a non-zero time interval.")
-    v0_guess_ecef = (pos_ecef[-1, :] - pos_ecef[0, :]) / dt_obs
+    v0_guess_ecef = estimate_initial_velocity_ecef(t, pos_ecef)
 
     pos_eci = ecef_to_eci_position(pos_ecef, t)
     density_profile = build_msis_density_profile(t, pos_ecef)
