@@ -42,16 +42,24 @@ def triptych_rcparams():
     }
 
 
-def read_doppler_from_hdf5():
+def resolve_repo_path(path: Path) -> Path:
+    path = Path(path)
+    if path.is_absolute():
+        return path
+    return Path(__file__).parent / path
+
+
+def read_doppler_from_hdf5(hdf5_path: Path = DOPPLER_HDF5_FILE):
     """Read doppler shift measurements from the summary HDF5 file."""
-    if not DOPPLER_HDF5_FILE.exists():
-        raise FileNotFoundError(f"HDF5 file not found: {DOPPLER_HDF5_FILE}")
-    
-    with h5py.File(DOPPLER_HDF5_FILE, 'r') as f:
-        doppler = f['summary_doppler'][()]  # (time, range) array
-        taxis = f['taxis'][()]  # time axis
-        ranges = f['ranges'][()]  # range axis
-    
+    hdf5_path = resolve_repo_path(hdf5_path)
+    if not hdf5_path.exists():
+        raise FileNotFoundError(f"HDF5 file not found: {hdf5_path}")
+
+    with h5py.File(hdf5_path, "r") as f:
+        doppler = np.asarray(f["summary_doppler"][()], dtype=float)
+        taxis = np.asarray(f["taxis"][()], dtype=float)
+        ranges = np.asarray(f["ranges"][()], dtype=float)
+
     return doppler, taxis, ranges
 
 
@@ -64,6 +72,7 @@ def compute_fit_range_rcs_grid(tx="kborn", rx="hagenow", fit_path=RCS_FIT_PATH):
     transmitter-target and target-receiver ranges from that fitted point are
     then used for all samples in the corresponding range gate.
     """
+    fit_path = resolve_repo_path(fit_path)
     decoded = plot_deco.load_decoded_power(tx=tx, rx=rx)
     snr = plot_deco.compute_snr_from_power(decoded["power"])
     range_km = np.asarray(decoded["range_km"], dtype=float)
@@ -118,31 +127,20 @@ def compute_fit_range_rcs_grid(tx="kborn", rx="hagenow", fit_path=RCS_FIT_PATH):
     return decoded
 
 
-
-
-
 def plot_doppler_range_panel(ax):
     """Plot doppler-range from HDF5 summary data."""
     try:
         doppler, taxis, ranges = read_doppler_from_hdf5()
-        
-        # Convert Unix timestamps to matplotlib datetime format
-        tvec = np.array([datetime.fromtimestamp(t, tz=timezone.utc) 
-                        for t in taxis], dtype='datetime64[ns]')
-        
-        # Use doppler data directly
-        d_plot = doppler.copy()
-        
-        # Apply masking or filtering if needed
-        # (using similar SNR threshold as original if available)
-        
+        tvec = np.asarray(taxis * 1e9, dtype="datetime64[ns]")
+        d_plot = -np.asarray(doppler, dtype=float)
+
         cmap = plt.cm.seismic.copy()
         cmap.set_bad("0.65")
 
         mesh = ax.pcolormesh(
             tvec,
             ranges,
-            d_plot.T,
+            d_plot,
             cmap=cmap,
             vmin=-100,
             vmax=100,
@@ -153,7 +151,7 @@ def plot_doppler_range_panel(ax):
         print(f"Error reading from HDF5: {e}. Falling back to plot_rdmf.read_kb()")
         P, N, D, tvec, rvec = plot_rdmf.read_kb()
         sn = P / N
-        d_plot = D.copy()
+        d_plot = -np.asarray(D, dtype=float)
         d_plot[sn < 4.0] = np.nan
 
         cmap = plt.cm.seismic.copy()
@@ -228,6 +226,7 @@ def main():
         help="Do not open the figure interactively after saving.",
     )
     args = parser.parse_args()
+    fit_path = resolve_repo_path(args.fit_path)
 
     start_dt = datetime.fromisoformat(START_TIME).replace(tzinfo=timezone.utc)
     end_dt = datetime.fromisoformat(END_TIME).replace(tzinfo=timezone.utc)
@@ -253,7 +252,7 @@ def main():
         rcs_grid = compute_fit_range_rcs_grid(
             tx="kborn",
             rx="hagenow",
-            fit_path=args.fit_path,
+            fit_path=fit_path,
         )
         rcs_result = plot_deco.plot_decoded(
             tx="kborn",
@@ -268,7 +267,7 @@ def main():
             output_filename=None,
             title=None,
             precomputed_grid=rcs_grid,
-            fit_path=args.fit_path,
+            fit_path=fit_path,
         )
         cb0 = fig.colorbar(rcs_result["mesh"], cax=cax0)
         cb0.set_label("RCS (dBsm)")
@@ -278,6 +277,60 @@ def main():
         cb1.set_label("Doppler shift (Hz)")
 
         plot_optical_doppler_panel(axes[2])
+
+        # --- Save panel data into a sidecar HDF5 in simone/ ---
+        try:
+            simone_dir = Path(__file__).parent / "simone"
+            simone_dir.mkdir(parents=True, exist_ok=True)
+            sidecar_path = simone_dir / "rcs_doppler_triptych_sidecar.h5"
+            summary_h5 = resolve_repo_path(DOPPLER_HDF5_FILE)
+
+            # gather rcs panel data
+            rcs_times = rcs_result.get("times_datetime64")
+            rcs_range_km = rcs_result.get("range_km")
+            rcs_dbsm = rcs_result.get("rcs_dbsm")
+
+            # gather optical fragment data
+            frag_aspects, frag_dops, frag_range, frag_dts = plot_deco.get_fragment_info(tx="kborn", rx="hagenow")
+            _, _, fragment_ids, *_ = plot_rdmf.pf.get_fragments()
+
+            with h5py.File(sidecar_path, "w") as fh:
+                fh.attrs["start_time"] = START_TIME
+                fh.attrs["end_time"] = END_TIME
+                fh.attrs["fit_path"] = str(fit_path)
+
+                grp_rcs = fh.create_group("rcs")
+                if rcs_times is not None:
+                    grp_rcs.create_dataset("times_ns", data=rcs_times.astype("datetime64[ns]").astype("int64"))
+                grp_rcs.create_dataset("range_km", data=rcs_range_km)
+                grp_rcs.create_dataset("rcs_dbsm", data=rcs_dbsm)
+
+                # doppler summary
+                if summary_h5.exists():
+                    with h5py.File(summary_h5, "r") as sf:
+                        ranges = np.asarray(sf["ranges"][()], dtype=float)
+                        taxis = np.asarray(sf["taxis"][()], dtype=float)
+                        summary_dop = np.asarray(sf["summary_doppler"][()], dtype=float)
+
+                    grp_dop = fh.create_group("doppler_summary")
+                    grp_dop.create_dataset("ranges_m", data=ranges)
+                    grp_dop.create_dataset("taxis_s", data=taxis)
+                    # save the same sign convention used for plotting (we negated in plotting)
+                    grp_dop.create_dataset("summary_doppler_hz", data=-1.0 * summary_dop)
+
+                # optical fragments
+                grp_opt = fh.create_group("optical_fragments")
+                for idx, fid in enumerate(fragment_ids):
+                    sub = grp_opt.create_group(f"F_{fid}")
+                    if idx < len(frag_dops):
+                        sub.create_dataset("doppler_hz", data=np.asarray(frag_dops[idx], dtype=float))
+                    if idx < len(frag_dts):
+                        times_ns = np.asarray(frag_dts[idx], dtype="datetime64[ns]").astype("int64")
+                        sub.create_dataset("times_ns", data=times_ns)
+                    if idx < len(frag_range):
+                        sub.create_dataset("range_km", data=np.asarray(frag_range[idx], dtype=float))
+        except Exception as e:
+            print(f"Warning: failed to write sidecar HDF5: {e}")
 
         axes[0].set_xlabel("")
         axes[1].set_xlabel("")
