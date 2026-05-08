@@ -11,7 +11,7 @@ print("NRL MSISE00 species:")
 for name, species_data in model.species.items():
     print(f"{name}:{species_data}")
 
-select_species = ["O", "N2", "O2"]
+select_species = ["N2", "O2"]
 
 bases = ["/model", "/impact/trajectory"]
 vel = []
@@ -37,14 +37,17 @@ atm = model.density(
     lat=lat_deg[:1],
     lon=lon_deg[:1],
     alt=alts,
-    mass_densities=True,
+    mass_densities=False,
 )
 temp = atm["Temperature"].values.flatten()
-num_tot = atm["Total"].values.flatten() / model.mean_mass
+num_tot = np.zeros_like(temp)
+mean_mass = np.zeros_like(temp)
+for symbol in select_species:
+    num_tot += atm[symbol].values.flatten()
+mean_mass = atm["Total"].values.flatten() / num_tot
 
-
-sound_speeds = aerodynamics.speed_of_sound_air(temp, model.mean_mass)
-mach_numbers = aerodynamics.mach_number(vel, sound_speeds)
+sound_speeds = aerodynamics.speed_of_sound_air(temp, mean_mass)
+mach_numbers = vel / sound_speeds
 post_shock_temps = aerodynamics.rankine_hugoniot_post_shock_temperature(
     temp, mach_numbers
 )

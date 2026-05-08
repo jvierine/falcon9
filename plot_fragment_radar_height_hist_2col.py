@@ -10,10 +10,13 @@ from pathlib import Path
 
 import h5py
 import matplotlib.pyplot as plt
+import scipy.constants
 import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
+from metablate.physics import aerodynamics
+from metablate.atmosphere import AtmPymsis
 
 PAPER_DIR = Path(__file__).resolve().parent
 FALCON9_DIR = PAPER_DIR.parent / "falcon9"
@@ -24,6 +27,13 @@ if str(FALCON9_DIR) not in sys.path:
 
 import plot_fragments  # noqa: E402
 
+model = AtmPymsis()
+
+print("NRL MSISE00 species:")
+for name, species_data in model.species.items():
+    print(f"{name}:{species_data}")
+
+select_species = ["N2", "O2"]
 
 @contextmanager
 def pushd(path: Path):
@@ -72,7 +82,10 @@ def load_specific_energy_loss_segments():
                 group = handle[group_name]
                 times = np.asarray(group["times_model"][()], dtype=float)
                 heights_km = np.asarray(group["hgt_m"][()], dtype=float) / 1e3
+                lat_deg = np.asarray(group["lat_deg"][()], dtype=float)
+                lon_deg = np.asarray(group["lon_deg"][()], dtype=float)
                 energy_loss = np.asarray(group["specific_energy_loss_rate_w_kg"][()], dtype=float)
+                speed_km_s = np.asarray(group["speed_m_s"][()], dtype=float) / 1e3
 
                 order = np.argsort(times)
                 heights_km = heights_km[order]
@@ -84,6 +97,10 @@ def load_specific_energy_loss_segments():
                             "label": path.stem,
                             "height_km": heights_km[mask],
                             "energy_loss_w_kg": energy_loss[mask],
+                            "lat_deg": lat_deg,
+                            "lon_deg": lon_deg,
+                            "times": times,
+                            "speed_km_s": speed_km_s,
                         }
                     )
 
@@ -260,6 +277,36 @@ def compute_dynamic_pressure_limits(fit_segments, extrapolated_segments):
     return vmin, vmax
 
 
+def calculate_shock_data(segments):
+    for data in segments:
+        atm = model.density(
+            time=np.array(data["times"][0], dtype="datetime64[s]"),
+            lat=data["lat_deg"][:1],
+            lon=data["lon_deg"][:1],
+            alt=data["height_km"]*1e3,
+            mass_densities=False,
+        )
+        temp = atm["Temperature"].values.flatten()
+        num_tot = np.zeros_like(temp)
+        mean_mass = np.zeros_like(temp)
+        for symbol in select_species:
+            num_tot += atm[symbol].values.flatten()
+        mean_mass = atm["Total"].values.flatten() / num_tot
+
+        sound_speeds = aerodynamics.speed_of_sound_air(temp, mean_mass)
+        mach_numbers = data["speed_km_s"] * 1e3 / sound_speeds
+        post_shock_temps = aerodynamics.rankine_hugoniot_post_shock_temperature(
+            temp, mach_numbers
+        )
+        eff_area = np.pi * (3.7e-10 / 2)**2
+        mfp = aerodynamics.atmospheric_mean_free_path(num_tot, eff_area)
+        Kn = mfp / 1.0
+        mach_numbers[Kn > 0.005] = np.nan
+        post_shock_temps[Kn > 0.005] = np.nan
+
+        data["post_shock_T"] = post_shock_temps
+
+
 def make_figure(output_path: Path, show=False):
     fragment_initial_heights_km, radar_heights_km = load_height_histogram_inputs()
     fit_segments, extrapolated_segments = load_specific_energy_loss_segments()
@@ -268,10 +315,9 @@ def make_figure(output_path: Path, show=False):
     bins, hmin, hmax = compute_histogram_bins(fragment_initial_heights_km, radar_heights_km)
     energy_vmin, energy_vmax = compute_energy_limits(fit_segments, extrapolated_segments)
     speed_vmin, speed_vmax = compute_speed_limits(speed_fit_segments, speed_extrapolated_segments)
-    dynamic_pressure_vmin, dynamic_pressure_vmax = compute_dynamic_pressure_limits(
-        dynamic_pressure_fit_segments,
-        dynamic_pressure_extrapolated_segments,
-    )
+
+    calculate_shock_data(fit_segments)
+    calculate_shock_data(extrapolated_segments)
 
     optical_color = "#6b6b6b"
     radar_color = "#cb181d"
@@ -289,7 +335,7 @@ def make_figure(output_path: Path, show=False):
             "axes.linewidth": 0.9,
         }
     ):
-        fig, (ax_hist, ax_energy, ax_speed, ax_dynamic_pressure) = plt.subplots(
+        fig, (ax_hist, ax_energy, ax_speed, ax_temp) = plt.subplots(
             1,
             4,
             figsize=(13.6, 4.8),
@@ -410,9 +456,9 @@ def make_figure(output_path: Path, show=False):
         ax_speed.grid(axis="y", linestyle="--", linewidth=0.5, color="0.86")
         ax_speed.text(0.02, 0.98, "c)", transform=ax_speed.transAxes, **panel_label_style)
 
-        for segment in dynamic_pressure_extrapolated_segments:
-            ax_dynamic_pressure.semilogx(
-                segment["dynamic_pressure_pa"],
+        for segment in extrapolated_segments:
+            ax_temp.plot(
+                segment["post_shock_T"],
                 segment["height_km"],
                 linestyle="--",
                 color=extrapolated_color,
@@ -420,9 +466,9 @@ def make_figure(output_path: Path, show=False):
                 alpha=0.75,
                 zorder=2,
             )
-        for segment in dynamic_pressure_fit_segments:
-            ax_dynamic_pressure.semilogx(
-                segment["dynamic_pressure_pa"],
+        for segment in fit_segments:
+            ax_temp.plot(
+                segment["post_shock_T"],
                 segment["height_km"],
                 linestyle="-",
                 color=fit_color,
@@ -431,12 +477,11 @@ def make_figure(output_path: Path, show=False):
                 zorder=3,
             )
 
-        ax_dynamic_pressure.set_xlim(dynamic_pressure_vmin, dynamic_pressure_vmax)
-        ax_dynamic_pressure.set_ylim(*HISTOGRAM_ALTITUDE_RANGE_KM)
-        ax_dynamic_pressure.set_xlabel("Dynamic pressure\n(Pa)")
-        ax_dynamic_pressure.tick_params(axis="y", labelleft=False)
-        ax_dynamic_pressure.grid(axis="y", which="both", linestyle="--", linewidth=0.5, color="0.86")
-        ax_dynamic_pressure.text(0.02, 0.98, "d)", transform=ax_dynamic_pressure.transAxes, **panel_label_style)
+        ax_temp.set_ylim(*HISTOGRAM_ALTITUDE_RANGE_KM)
+        ax_temp.set_xlabel("Post-shock temperature\n(K)")
+        ax_temp.tick_params(axis="y", labelleft=False)
+        ax_temp.grid(axis="y", which="both", linestyle="--", linewidth=0.5, color="0.86")
+        ax_temp.text(0.02, 0.98, "d)", transform=ax_temp.transAxes, **panel_label_style)
         print("saving to %s"%(output_path))
         fig.savefig(output_path, dpi=300, bbox_inches="tight")
         if show:
