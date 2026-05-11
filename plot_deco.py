@@ -20,6 +20,7 @@ from matplotlib import ticker
 
 DECODED_SAMPLE_INTERVAL_S = 1000 * 10e-6
 RANGE_SAMPLE_INTERVAL_S = 10e-6
+DEFAULT_TIME_SMOOTH_SAMPLES = 20
 DEFAULT_RCS_LINKS = [
     ("jruh", "bornim"),
     ("jruh", "bornholm"),
@@ -38,6 +39,17 @@ LINK_DISPLAY_NAMES = {
     "hagenow": "Hagenow",
     "moitin": "Moitin",
 }
+OPTICAL_FRAGMENT_FAMILY_1_IDS = {"1", "3", "5", "9", "n", "o", "p", "r", "s", "w", "v", "x", "z"}
+OPTICAL_FRAGMENT_FAMILY_2_IDS = {"2", "4", "7", "8", "a", "c", "h", "g", "i", "m", "j", "l", "k", "t", "u", "e", "d"}
+
+
+def optical_fragment_family_color(fragment_id):
+    fragment_id = str(fragment_id)
+    if fragment_id in OPTICAL_FRAGMENT_FAMILY_2_IDS:
+        return (1.0, 0.0, 0.0, 0.65)
+    return (1.0, 1.0, 1.0, 0.65)
+
+
 def get_fragment_info(tx="kborn",rx="hagenow"):
     lam=sc.c/32.55e6
     station_coords = simone_conf.station_coords
@@ -112,6 +124,38 @@ def get_fragment_info(tx="kborn",rx="hagenow"):
         fragment_dts.append(tv)
 
     return(fragment_aspects,fragment_dops,fragment_range,fragment_dts)
+
+
+def get_optical_fragment_range_points(tx="kborn", rx="hagenow"):
+    """Return optical fragment detections as bistatic propagation-range points."""
+    station_coords = simone_conf.station_coords
+    _, _, fragment_ids, fragment_pos, _, _, fragment_times = pf.get_fragments()
+
+    tx_latlon = station_coords["tx"][tx]
+    rx_latlon = station_coords["rx"][rx]
+    tx_ecef = n.asarray(jcoord.geodetic2ecef(tx_latlon[0], tx_latlon[1], 10.0), dtype=float)
+    rx_ecef = n.asarray(jcoord.geodetic2ecef(rx_latlon[0], rx_latlon[1], 10.0), dtype=float)
+
+    points = []
+    for fragment_id, pos_ecef, times_unix in zip(fragment_ids, fragment_pos, fragment_times):
+        pos_ecef = n.asarray(pos_ecef, dtype=float)
+        times_unix = n.asarray(times_unix, dtype=float)
+        if pos_ecef.size == 0 or times_unix.size == 0:
+            continue
+        ranges_km = (
+            n.linalg.norm(pos_ecef - tx_ecef[None, :], axis=1)
+            + n.linalg.norm(pos_ecef - rx_ecef[None, :], axis=1)
+        ) / 1e3
+        times_dt64 = n.asarray(times_unix * 1e9, dtype="datetime64[ns]")
+        points.append(
+            {
+                "fragment_id": fragment_id,
+                "times_datetime64": times_dt64,
+                "propagation_range_km": ranges_km,
+            }
+        )
+    return points
+
 
 def _norm_id(x):
     return re.sub(r'[^0-9a-z]', '', str(x).lower())
@@ -234,6 +278,40 @@ def compute_snr_from_power(power):
     return power / noise_floor[None, :]
 
 
+def build_time_smoothing_kernel(time_smooth_samples=None, time_smooth_kernel=None):
+    if time_smooth_kernel is not None:
+        kernel = n.asarray(time_smooth_kernel, dtype=float).reshape(-1)
+    elif time_smooth_samples is not None and int(time_smooth_samples) > 1:
+        width = int(time_smooth_samples)
+        kernel = n.repeat(1.0 / float(width), width)
+    else:
+        return None
+
+    if kernel.size < 2:
+        return None
+
+    kernel_sum = float(n.sum(kernel))
+    if not n.isfinite(kernel_sum) or kernel_sum == 0.0:
+        raise ValueError("time smoothing kernel must have a finite, non-zero sum")
+
+    return kernel / kernel_sum
+
+
+def smooth_time_series_by_range_gate(values, kernel):
+    values = n.asarray(values, dtype=float)
+    kernel = n.asarray(kernel, dtype=float).reshape(-1)
+    if values.ndim != 2:
+        raise ValueError("values must have shape (n_range, n_time)")
+    if kernel.size < 2:
+        return values.copy()
+
+    smoothed = n.empty_like(values)
+    for ir in range(values.shape[0]):
+        # Centered convolution (`mode="same"`) preserves the time grid.
+        smoothed[ir, :] = n.convolve(values[ir, :], kernel, mode="same")
+    return smoothed
+
+
 def compute_rcs_grid(tx="jruh", rx="bornim", time_smooth_samples=None, time_smooth_kernel=None):
     decoded = load_decoded_power(tx=tx, rx=rx)
     snr = compute_snr_from_power(decoded["power"])
@@ -242,28 +320,12 @@ def compute_rcs_grid(tx="jruh", rx="bornim", time_smooth_samples=None, time_smoo
     # Keep a copy of raw SN for debugging/inspection
     decoded["snr_raw"] = snr.copy()
 
-    # Build smoothing kernel if requested. Default: no smoothing unless samples provided.
-    if time_smooth_kernel is None and time_smooth_samples is not None and int(time_smooth_samples) > 1:
-        kernel = n.repeat(1.0 / float(time_smooth_samples), int(time_smooth_samples))
-    elif time_smooth_kernel is not None:
-        kernel = n.asarray(time_smooth_kernel, dtype=float)
-    else:
-        kernel = None
-
+    kernel = build_time_smoothing_kernel(
+        time_smooth_samples=time_smooth_samples,
+        time_smooth_kernel=time_smooth_kernel,
+    )
     if kernel is not None:
-        # Ensure snr is 2D (n_range, n_time)
-        try:
-            n_range, n_time = snr.shape
-        except Exception:
-            kernel = None
-
-    if kernel is not None:
-        smoothed = n.empty_like(snr)
-        for ir in range(snr.shape[0]):
-            row = n.asarray(snr[ir, :], dtype=float)
-            # use np.convolve (n.convolve) with mode='same' to avoid time shift
-            smoothed[ir, :] = n.convolve(row, kernel, mode="same")
-        snr = smoothed
+        snr = smooth_time_series_by_range_gate(snr, kernel)
 
     r_tx = n.broadcast_to((0.5 * range_km[:, None]) * 1e3, snr.shape)
     rcs = sn_plus_n_over_n_to_rcs(
@@ -435,6 +497,41 @@ def load_fragment_fit_model_trajectory(fit_path="ballistic_fit_sharedstart_1.h5"
         }
 
 
+def get_fragment_fit_paths(fit_paths=None, pattern="ballistic_fit_sharedstart*.h5"):
+    base_dir = Path(__file__).resolve().parent
+    if fit_paths is None:
+        return sorted(base_dir.glob(pattern))
+
+    if isinstance(fit_paths, (str, Path)):
+        fit_paths = [fit_paths]
+
+    resolved = []
+    for fit_path in fit_paths:
+        fit_path = Path(fit_path)
+        if any(char in str(fit_path) for char in "*?[]"):
+            search_path = fit_path if fit_path.is_absolute() else base_dir / fit_path
+            resolved.extend(sorted(search_path.parent.glob(search_path.name)))
+        else:
+            resolved.append(fit_path if fit_path.is_absolute() else base_dir / fit_path)
+    return resolved
+
+
+def get_fragment_fit_time_track(fit_path, start_time=None, end_time=None):
+    track = load_fragment_fit_model_trajectory(fit_path=fit_path)
+    times_unix = n.asarray(track["times_unix"], dtype=float)
+    times_dt64 = n.asarray(times_unix * 1e9, dtype="datetime64[ns]")
+
+    mask = n.isfinite(times_unix)
+    start_dt64 = _coerce_datetime64(start_time)
+    end_dt64 = _coerce_datetime64(end_time)
+    if start_dt64 is not None:
+        mask &= times_dt64 >= start_dt64
+    if end_dt64 is not None:
+        mask &= times_dt64 <= end_dt64
+
+    return times_dt64[mask]
+
+
 def get_fragment_fit_bragg_geometry(
     tx,
     rx,
@@ -540,7 +637,10 @@ def plot_decoded(
     colorbar_label="RCS (dBsm)",
     precomputed_grid=None,
     fit_path="ballistic_fit_sharedstart_1.h5",
+    fit_paths=None,
     overlay_predicted_range=True,
+    predicted_range_overlay="ballistic",
+    optical_fragment_delay_s=0.0,
     show_aspect_axis=True,
     aspect_time_shift_s=-1.0,
     aspect_tick_values=(130, 110, 90, 70, 50),
@@ -588,21 +688,57 @@ def plot_decoded(
         rasterized=True,
     )
     if overlay_predicted_range:
-        range_info = get_fragment_fit_bragg_geometry(
-            tx=tx,
-            rx=rx,
-            time_dt64=times_plot,
-            fit_path=fit_path,
-        )
-        ax.plot(
-            times_plot,
-            range_info["propagation_range_km"],
-            color="white",
-            linestyle="--",
-            linewidth=1.0,
-            alpha=0.4,
-            zorder=5,
-        )
+        if predicted_range_overlay == "ballistic":
+            overlay_paths = get_fragment_fit_paths(fit_paths if fit_paths is not None else [fit_path])
+            for overlay_fit_path in overlay_paths:
+                fit_times = get_fragment_fit_time_track(
+                    overlay_fit_path,
+                    start_time=times_plot[0],
+                    end_time=times_plot[-1],
+                )
+                if fit_times.size < 2:
+                    continue
+                range_info = get_fragment_fit_bragg_geometry(
+                    tx=tx,
+                    rx=rx,
+                    time_dt64=fit_times,
+                    fit_path=overlay_fit_path,
+                )
+                ax.plot(
+                    fit_times,
+                    range_info["propagation_range_km"],
+                    color="white",
+                    linestyle="--",
+                    linewidth=0.9,
+                    alpha=0.45,
+                    zorder=5,
+                )
+        elif predicted_range_overlay == "optical":
+            for point_group in get_optical_fragment_range_points(tx=tx, rx=rx):
+                point_times = n.asarray(point_group["times_datetime64"])
+                if optical_fragment_delay_s != 0.0:
+                    point_times = point_times + n.timedelta64(
+                        int(round(float(optical_fragment_delay_s) * 1e9)),
+                        "ns",
+                    )
+                point_ranges = n.asarray(point_group["propagation_range_km"], dtype=float)
+                mask = n.isfinite(point_ranges) & (point_times >= times_plot[0]) & (point_times <= times_plot[-1])
+                if not n.any(mask):
+                    continue
+                ax.scatter(
+                    point_times[mask],
+                    point_ranges[mask],
+                    s=8.0,
+                    marker="o",
+                    facecolors="none",
+                    edgecolors=optical_fragment_family_color(point_group["fragment_id"]),
+                    linewidths=0.35,
+                    zorder=6,
+                )
+        elif predicted_range_overlay not in ("none", None):
+            raise ValueError(
+                "predicted_range_overlay must be 'ballistic', 'optical', or 'none'."
+            )
     ax.set_ylim(ymin, ymax)
     ax.set_xlabel("Time (UTC)")
     ax.set_ylabel("Propagation range (km)")
