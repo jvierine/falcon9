@@ -24,6 +24,7 @@ DEFAULT_PANEL_RANGE_LIMITS_KM = [
 
 SUMMARY_DIR = Path(__file__).with_name("simone").joinpath("decoded_summaries")
 SUMMARY_FILENAME_TEMPLATE = "snr_grid_{tx}_{rx}.npz"
+DEFAULT_OPTICAL_FRAGMENT_DELAY_S = 1.5
 
 
 def get_summary_cache_path(tx, rx):
@@ -46,12 +47,25 @@ def load_summary_cache(tx, rx):
         }
 
 
-def load_plot_grid(tx, rx, use_summary_cache=False):
+def load_plot_grid(tx, rx, use_summary_cache=False, time_smooth_samples=None, time_smooth_kernel=None):
+    """Load decoded grid for plotting.
+
+    If use_summary_cache is True and a summary exists, return it. Otherwise
+    compute the full decoded grid. Optional smoothing parameters are forwarded
+    to compute_rcs_grid when computing the full grid. For summary-cache data
+    smoothing (if requested) is applied later in `plot_all_links` where the
+    cached dB grid is available.
+    """
     if use_summary_cache:
         summary = load_summary_cache(tx, rx)
         if summary is not None:
             return summary
-    return plot_deco.compute_rcs_grid(tx=tx, rx=rx)
+    return plot_deco.compute_rcs_grid(
+        tx=tx,
+        rx=rx,
+        time_smooth_samples=time_smooth_samples,
+        time_smooth_kernel=time_smooth_kernel,
+    )
 
 
 def parse_panel_ranges(value):
@@ -70,6 +84,28 @@ def parse_panel_ranges(value):
             raise argparse.ArgumentTypeError(f"Invalid panel range '{entry}': ymax must exceed ymin.")
         ranges.append((ymin, ymax))
     return ranges
+
+
+def parse_panel_labels(value):
+    value = str(value).strip().lower()
+    valid_labels = set("abcdefgh")
+    if value == "all":
+        return tuple("abcdefgh")
+    if value in ("", "none"):
+        return tuple()
+
+    labels = []
+    for entry in value.replace(" ", "").split(","):
+        if not entry:
+            continue
+        for label in entry:
+            if label not in valid_labels:
+                raise argparse.ArgumentTypeError(
+                    f"Invalid panel label '{label}'. Use labels a-h, 'all', or 'none'."
+                )
+            if label not in labels:
+                labels.append(label)
+    return tuple(labels)
 
 
 def build_parser():
@@ -118,6 +154,43 @@ def build_parser():
         help="Use low-resolution cached S/N grids from simone/decoded_summaries for faster preview plots.",
     )
     parser.add_argument(
+        "--time-smooth-samples",
+        type=int,
+        default=plot_deco.DEFAULT_TIME_SMOOTH_SAMPLES,
+        help=(
+            "Centered rectangular integration width in time samples applied "
+            "independently to each range gate before plotting."
+        ),
+    )
+    parser.add_argument(
+        "--range-overlay",
+        choices=("ballistic", "optical", "none"),
+        default="optical",
+        help=(
+            "Range overlay to draw on each panel: dashed ballistic_fit_sharedstart*.h5 "
+            "tracks, optical fragment points from fragments/*.h5, or no overlay."
+        ),
+    )
+    parser.add_argument(
+        "--optical-fragment-delay-s",
+        type=float,
+        default=DEFAULT_OPTICAL_FRAGMENT_DELAY_S,
+        help=(
+            "Time shift applied to optical fragment overlay points, in seconds. "
+            "Positive values move optical points later relative to the radar data."
+        ),
+    )
+    parser.add_argument(
+        "--overlay-panels",
+        type=parse_panel_labels,
+        default=parse_panel_labels("h"),
+        help=(
+            "Panel labels that should show the selected range overlay. "
+            "Use labels a-h, comma-separated labels such as 'a,c,h', 'all', or 'none'. "
+            "Default: h."
+        ),
+    )
+    parser.add_argument(
         "--show",
         action="store_true",
         help="Display the figure interactively after saving.",
@@ -134,18 +207,52 @@ def plot_all_links(
     use_summary_cache=False,
     output="rcs_all_links_fullpage.pdf",
     show=False,
+    # optional time averaging (linear SN) applied before converting to dB
+    time_smooth_samples=plot_deco.DEFAULT_TIME_SMOOTH_SAMPLES,
+    time_smooth_kernel=None,
+    range_overlay="optical",
+    optical_fragment_delay_s=DEFAULT_OPTICAL_FRAGMENT_DELAY_S,
+    overlay_panels=("h",),
 ):
     panel_labels = "abcdefgh"
+    overlay_panels = set(parse_panel_labels(",".join(overlay_panels)) if isinstance(overlay_panels, (list, tuple, set)) else parse_panel_labels(overlay_panels))
     links = plot_deco.DEFAULT_RCS_LINKS
+    fit_paths = plot_deco.get_fragment_fit_paths(pattern="ballistic_fit_sharedstart*.h5")
+    if range_overlay == "ballistic" and not fit_paths:
+        raise FileNotFoundError("No ballistic_fit_sharedstart*.h5 files found for predicted range overlays.")
     if panel_ranges_km is None:
         panel_ranges_km = [(float(min_range_km), float(max_range_km))] * len(links)
     if len(panel_ranges_km) != len(links):
         raise ValueError("panel_ranges_km must have one (ymin, ymax) tuple per link.")
 
-    global_vmin = -10.0
+    global_vmin = -20.0
     global_vmax = None
     for (tx, rx), (panel_ymin, panel_ymax) in zip(links, panel_ranges_km):
-        decoded = load_plot_grid(tx=tx, rx=rx, use_summary_cache=use_summary_cache)
+        decoded = load_plot_grid(
+            tx=tx,
+            rx=rx,
+            use_summary_cache=use_summary_cache,
+            time_smooth_samples=time_smooth_samples if not use_summary_cache else None,
+            time_smooth_kernel=time_smooth_kernel if not use_summary_cache else None,
+        )
+        # If we loaded a summary cache it contains dB values only; if the user
+        # requested smoothing we need to operate on linear SN before converting
+        # back to dB. For full decoded data, smoothing has already been applied
+        # inside compute_rcs_grid when load_plot_grid forwarded the smoothing
+        # parameters.
+        if use_summary_cache and (time_smooth_kernel is not None or (time_smooth_samples is not None and int(time_smooth_samples) > 1)):
+            kernel = plot_deco.build_time_smoothing_kernel(
+                time_smooth_samples=time_smooth_samples,
+                time_smooth_kernel=time_smooth_kernel,
+            )
+            # operate on linear SN (S+N)/N
+            sn_db = decoded["sn_plus_n_over_n_db"]
+            sn_lin = 10.0 ** (sn_db / 10.0)
+            sn_smoothed = plot_deco.smooth_time_series_by_range_gate(sn_lin, kernel)
+            # convert back to dB and replace the array used for plotting
+            decoded = dict(decoded)
+            decoded["sn_plus_n_over_n_db"] = 10.0 * np.log10(np.maximum(sn_smoothed, 1e-12))
+
         _, sn_plot_db = plot_deco._slice_time_window(
             decoded["times_datetime64"],
             decoded["sn_plus_n_over_n_db"],
@@ -202,7 +309,15 @@ def plot_all_links(
 
         mesh = None
         for idx, (((tx, rx), (panel_ymin, panel_ymax)), ax) in enumerate(zip(zip(links, panel_ranges_km), axes.flat)):
-            decoded = load_plot_grid(tx=tx, rx=rx, use_summary_cache=use_summary_cache)
+            decoded = load_plot_grid(
+                tx=tx,
+                rx=rx,
+                use_summary_cache=use_summary_cache,
+                time_smooth_samples=time_smooth_samples if not use_summary_cache else None,
+                time_smooth_kernel=time_smooth_kernel if not use_summary_cache else None,
+            )
+            panel_label = panel_labels[idx]
+            show_overlay = range_overlay != "none" and panel_label in overlay_panels
             result = plot_deco.plot_decoded(
                 tx=tx,
                 rx=rx,
@@ -219,7 +334,10 @@ def plot_all_links(
                 vmin=global_vmin,
                 vmax=global_vmax,
                 precomputed_grid=decoded,
-                overlay_predicted_range=True,
+                overlay_predicted_range=show_overlay,
+                predicted_range_overlay=range_overlay,
+                optical_fragment_delay_s=optical_fragment_delay_s,
+                fit_paths=fit_paths,
                 show_aspect_axis=False,
             )
             if mesh is None:
@@ -228,7 +346,7 @@ def plot_all_links(
             ax.text(
                 0.02,
                 0.96,
-                f"{panel_labels[idx]})",
+                f"{panel_label})",
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
@@ -279,6 +397,10 @@ def main():
         panel_ranges_km=args.panel_ranges,
         use_summary_cache=args.use_summary_cache,
         output=args.output,
+        time_smooth_samples=args.time_smooth_samples,
+        range_overlay=args.range_overlay,
+        optical_fragment_delay_s=args.optical_fragment_delay_s,
+        overlay_panels=args.overlay_panels,
         show=args.show,
     )
 
