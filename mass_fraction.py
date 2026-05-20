@@ -24,3 +24,4 @@ m_spacecraft_influx=1600e3 # kg per year (Schultz et.al., 2026)
 print("influx %1.0f tons per day"%(m_spacecraft_influx/365/1e3))
 
 print("annual space waste mass / atmospheric mass (40-80 km) %1.3f ppt"%(1e12*m_spacecraft_influx/m_total))
+
