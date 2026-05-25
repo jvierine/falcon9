@@ -32,13 +32,13 @@ If you are working from the released data package rather than the full local ana
 
 ## Example Outputs
 
-Representative outputs already included in the repository:
+Representative paper figures rendered for GitHub display:
 
-![Optical camera average frame](2025_02_19_03_46_00_000_010880_avg_first25.png)
+![Study-area map](readme_figures/fig_map_falcon9.png)
 
-![Radar mode summary](figures_radar/radar_modes_summary_dt=0.0s.png)
+![Optical and radar overview](readme_figures/optical_radar_2x2.png)
 
-![Doppler summary](doppler_shift_publication.png)
+![RCS and Doppler summary](readme_figures/rcs_doppler_triptych.png)
 
 Additional publication-style products in this repository include:
 
