@@ -1,6 +1,9 @@
 # Falcon 9 Re-entry Analysis
 
-This repository contains the analysis code and working products used to study the 19 February 2025 Falcon 9 upper-stage re-entry over central Europe.
+This repository contains the analysis code and data products that support the submitted article on the 19 February 2025 Falcon 9 upper-stage re-entry over central Europe.
+
+- Article: [arXiv:2605.29124v1](https://arxiv.org/abs/2605.29124v1)
+- Data DOI: [10.5281/zenodo.20070800](https://doi.org/10.5281/zenodo.20070800)
 
 The project combines:
 
@@ -10,12 +13,6 @@ The project combines:
 - figure generation for the associated manuscript
 
 This is a research workspace rather than a minimal software package. It contains code, intermediate products, diagnostic outputs, and publication figures from the analysis.
-
-## Article
-
-The submitted article is available on arXiv:
-
-- [arXiv:2605.29124v1](https://arxiv.org/abs/2605.29124v1)
 
 ## Example Figures
 
@@ -35,9 +32,7 @@ Additional publication products in this repository include:
 
 ## Data
 
-The curated data release for this project is archived on Zenodo:
-
-- DOI: [10.5281/zenodo.20070800](https://doi.org/10.5281/zenodo.20070800)
+The curated data release for this project is archived on Zenodo at the DOI listed above.
 
 The public analysis repository is:
 
