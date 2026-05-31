@@ -11,6 +11,12 @@ The project combines:
 
 This is a research workspace rather than a minimal software package. It contains code, intermediate products, diagnostic outputs, and publication figures from the analysis.
 
+## Article
+
+The submitted article is available on arXiv:
+
+- [arXiv:2605.29124v1](https://arxiv.org/abs/2605.29124v1)
+
 ## Example Figures
 
 Representative figures from the paper:
