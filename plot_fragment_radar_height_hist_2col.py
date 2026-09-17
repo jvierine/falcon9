@@ -64,20 +64,25 @@ def load_height_histogram_inputs():
     else:
         fragment_heights_km = np.asarray([], dtype=float)
 
-    branching_heights_km = []
+    first_detection_heights_km = []
     for fragment_id, geo, times in zip(fragment_ids, fragment_geo_pos, fragment_times):
-        if str(fragment_id) in {"1", "2"} or geo is None or times is None or len(geo) == 0 or len(times) == 0:
+        if geo is None or times is None or len(geo) == 0 or len(times) == 0:
             continue
         first_idx = int(np.argmin(np.asarray(times, dtype=float)))
         first_height_km = float(geo[first_idx, 2]) / 1e3
         if np.isfinite(first_height_km):
-            branching_heights_km.append(first_height_km)
+            first_detection_heights_km.append(first_height_km)
 
     radar_heights_km = plot_fragments.get_radar_detection_heights_km(ralt, rsnr)
+    if len(first_detection_heights_km) != len(fragment_ids):
+        raise ValueError(
+            f"Expected one first-detection altitude for each of {len(fragment_ids)} fragments; "
+            f"found {len(first_detection_heights_km)}."
+        )
     return (
         np.asarray(fragment_heights_km, dtype=float),
         np.asarray(radar_heights_km, dtype=float),
-        np.asarray(branching_heights_km, dtype=float),
+        np.asarray(first_detection_heights_km, dtype=float),
     )
 
 
@@ -319,7 +324,7 @@ def calculate_shock_data(segments):
 
 
 def make_figure(output_path: Path, show=False):
-    fragment_heights_km, radar_heights_km, branching_heights_km = load_height_histogram_inputs()
+    fragment_heights_km, radar_heights_km, first_detection_heights_km = load_height_histogram_inputs()
     fit_segments, extrapolated_segments = load_specific_energy_loss_segments()
     speed_fit_segments, speed_extrapolated_segments = load_speed_segments()
     dynamic_pressure_fit_segments, dynamic_pressure_extrapolated_segments = load_dynamic_pressure_segments()
@@ -332,7 +337,7 @@ def make_figure(output_path: Path, show=False):
 
     optical_color = "#6b6b6b"
     radar_color = "#cb181d"
-    branching_color = "black"
+    first_detection_color = "black"
     fit_color = "black"
     extrapolated_color = "black"
 
@@ -389,24 +394,24 @@ def make_figure(output_path: Path, show=False):
             color=radar_color,
             linewidth=1.8,
         )
-        branching_counts, _ = np.histogram(branching_heights_km, bins=bins)
+        first_detection_counts, _ = np.histogram(first_detection_heights_km, bins=bins)
         bin_centers = 0.5 * (bins[:-1] + bins[1:])
         ax_hist_top.stairs(
-            branching_counts,
+            first_detection_counts,
             bins,
             orientation="horizontal",
-            color=branching_color,
+            color=first_detection_color,
             linewidth=1.8,
         )
-        nonzero_branching = branching_counts > 0
+        nonzero_first_detection = first_detection_counts > 0
         ax_hist_top.plot(
-            branching_counts[nonzero_branching],
-            bin_centers[nonzero_branching],
+            first_detection_counts[nonzero_first_detection],
+            bin_centers[nonzero_first_detection],
             "o",
-            color=branching_color,
+            color=first_detection_color,
             markersize=3.5,
         )
-        ax_hist_top.set_xlabel("Radar detections / branching events")
+        ax_hist_top.set_xlabel("Radar / first detections of fragments")
         ax_hist_top.tick_params(axis="x", colors="black")
         ax_hist_top.spines["top"].set_color("black")
         ax_hist_top.spines["bottom"].set_visible(False)
@@ -423,11 +428,11 @@ def make_figure(output_path: Path, show=False):
             Line2D(
                 [0],
                 [0],
-                color=branching_color,
+                color=first_detection_color,
                 linewidth=1.8,
                 marker="o",
                 markersize=3.5,
-                label="Branching event",
+                label="First detections of fragments",
             ),
         ]
         ax_hist.legend(handles=hist_handles, frameon=True, loc="lower right")
