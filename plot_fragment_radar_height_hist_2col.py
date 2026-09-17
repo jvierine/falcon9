@@ -21,6 +21,14 @@ from metablate.atmosphere import AtmPymsis
 PAPER_DIR = Path(__file__).resolve().parent
 FALCON9_DIR = PAPER_DIR.parent / "falcon9"
 HISTOGRAM_ALTITUDE_RANGE_KM = (30.0, 90.0)
+# Knudsen-number boundaries used in the original Figure 9 for a 1 m object
+# following the F1 trajectory. Keep these fixed so figure revisions do not
+# silently change the previously reported continuum-flow regions.
+KNUDSEN_BOUNDARY_HEIGHTS_KM = {
+    1e-2: 84.4922579162,
+    1e-3: 69.7394088698,
+    1e-4: 51.8286239598,
+}
 
 if str(FALCON9_DIR) not in sys.path:
     sys.path.insert(0, str(FALCON9_DIR))
@@ -550,19 +558,10 @@ def make_figure(output_path: Path, show=False):
         ax_temp.grid(axis="y", which="both", linestyle="--", linewidth=0.5, color="0.86")
         ax_temp.text(0.02, 0.98, "d)", transform=ax_temp.transAxes, **panel_label_style)
 
-        reference = fit_segments[0]
-        finite = np.isfinite(reference["Kn"]) & (reference["Kn"] > 0.0) & np.isfinite(reference["height_km"])
-        log_kn = np.log10(reference["Kn"][finite])
-        reference_heights = reference["height_km"][finite]
-        order = np.argsort(log_kn)
-        threshold_heights = {
-            threshold: float(np.interp(np.log10(threshold), log_kn[order], reference_heights[order]))
-            for threshold in (1e-2, 1e-3, 1e-4)
-        }
         band_edges = [
-            (threshold_heights[1e-2], threshold_heights[1e-3], "0.92", r"$Kn<0.01$", 0.10),
-            (threshold_heights[1e-3], threshold_heights[1e-4], "0.84", r"$Kn<0.001$", 0.10),
-            (threshold_heights[1e-4], HISTOGRAM_ALTITUDE_RANGE_KM[0], "0.76", r"$Kn<0.0001$", 0.58),
+            (KNUDSEN_BOUNDARY_HEIGHTS_KM[1e-2], KNUDSEN_BOUNDARY_HEIGHTS_KM[1e-3], "0.92", r"$Kn<0.01$", 0.10),
+            (KNUDSEN_BOUNDARY_HEIGHTS_KM[1e-3], KNUDSEN_BOUNDARY_HEIGHTS_KM[1e-4], "0.84", r"$Kn<0.001$", 0.10),
+            (KNUDSEN_BOUNDARY_HEIGHTS_KM[1e-4], HISTOGRAM_ALTITUDE_RANGE_KM[0], "0.76", r"$Kn<0.0001$", 0.58),
         ]
         for upper, lower, shade, label, x_label in band_edges:
             ax_temp.axhspan(lower, upper, color=shade, zorder=0)
