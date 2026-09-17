@@ -317,6 +317,7 @@ def calculate_shock_data(segments):
         eff_area = np.pi * (3.7e-10 / 2)**2
         mfp = aerodynamics.atmospheric_mean_free_path(num_tot, eff_area)
         Kn = mfp / 1.0
+        data["Kn"] = Kn.copy()
         mach_numbers[Kn > 0.005] = np.nan
         post_shock_temps[Kn > 0.005] = np.nan
 
@@ -343,28 +344,28 @@ def make_figure(output_path: Path, show=False):
 
     with plt.rc_context(
         {
-            "font.size": 13,
-            "axes.labelsize": 16,
-            "axes.titlesize": 16,
-            "xtick.labelsize": 14,
-            "ytick.labelsize": 14,
-            "legend.fontsize": 13,
+            "font.size": 11,
+            "axes.labelsize": 12,
+            "axes.titlesize": 12,
+            "xtick.labelsize": 11,
+            "ytick.labelsize": 11,
+            "legend.fontsize": 10,
             "axes.linewidth": 0.9,
         }
     ):
         fig, (ax_hist, ax_energy, ax_speed, ax_temp) = plt.subplots(
             1,
             4,
-            figsize=(13.6, 4.8),
+            figsize=(14.4, 4.8),
             sharey=True,
             constrained_layout=True,
-            gridspec_kw={"width_ratios": (1.0, 1.15, 0.95, 1.05)},
+            gridspec_kw={"width_ratios": (1.0, 1.0, 1.0, 1.0)},
         )
 
         panel_label_style = {
             "ha": "left",
             "va": "top",
-            "fontsize": 16,
+            "fontsize": 14,
             "fontweight": "bold",
         }
 
@@ -384,6 +385,28 @@ def make_figure(output_path: Path, show=False):
         ax_hist.spines["top"].set_visible(False)
         ax_hist.grid(axis="y", color="0.88", linewidth=0.8)
         ax_hist.text(0.02, 0.98, "a)", transform=ax_hist.transAxes, **panel_label_style)
+
+        mean_height = float(np.mean(fragment_heights_km))
+        sigma_height = float(np.std(fragment_heights_km))
+        altitude_grid = np.linspace(bins[0], bins[-1], 400)
+        bin_width = float(bins[1] - bins[0])
+        gaussian_counts = (
+            fragment_heights_km.size
+            * bin_width
+            / (sigma_height * np.sqrt(2.0 * np.pi))
+            * np.exp(-0.5 * ((altitude_grid - mean_height) / sigma_height) ** 2)
+        )
+        ax_hist.plot(gaussian_counts, altitude_grid, "--", color="0.45", linewidth=1.2)
+        ax_hist.text(
+            0.97,
+            0.93,
+            f"Gaussian fit\n$z_0={mean_height:.1f}$ km\n$\\sigma={sigma_height:.1f}$ km",
+            transform=ax_hist.transAxes,
+            ha="right",
+            va="top",
+            fontsize=10,
+            bbox={"facecolor": "white", "edgecolor": "0.4", "pad": 2.0},
+        )
 
         ax_hist_top = ax_hist.twiny()
         ax_hist_top.hist(
@@ -411,7 +434,7 @@ def make_figure(output_path: Path, show=False):
             color=first_detection_color,
             markersize=3.5,
         )
-        ax_hist_top.set_xlabel("Radar / first detections of fragments")
+        ax_hist_top.set_xlabel("Radar / fragment first detections")
         ax_hist_top.tick_params(axis="x", colors="black")
         ax_hist_top.spines["top"].set_color("black")
         ax_hist_top.spines["bottom"].set_visible(False)
@@ -425,6 +448,7 @@ def make_figure(output_path: Path, show=False):
                 label="Optical",
             ),
             Line2D([0], [0], color=radar_color, linewidth=1.8, label="Radar"),
+            Line2D([0], [0], color="0.45", linestyle="--", linewidth=1.2, label="Gaussian fit"),
             Line2D(
                 [0],
                 [0],
@@ -432,7 +456,7 @@ def make_figure(output_path: Path, show=False):
                 linewidth=1.8,
                 marker="o",
                 markersize=3.5,
-                label="First detections of fragments",
+                label="Fragment first detections",
             ),
         ]
         ax_hist.legend(handles=hist_handles, frameon=True, loc="lower right")
@@ -525,6 +549,35 @@ def make_figure(output_path: Path, show=False):
         ax_temp.tick_params(axis="y", labelleft=False)
         ax_temp.grid(axis="y", which="both", linestyle="--", linewidth=0.5, color="0.86")
         ax_temp.text(0.02, 0.98, "d)", transform=ax_temp.transAxes, **panel_label_style)
+
+        reference = fit_segments[0]
+        finite = np.isfinite(reference["Kn"]) & (reference["Kn"] > 0.0) & np.isfinite(reference["height_km"])
+        log_kn = np.log10(reference["Kn"][finite])
+        reference_heights = reference["height_km"][finite]
+        order = np.argsort(log_kn)
+        threshold_heights = {
+            threshold: float(np.interp(np.log10(threshold), log_kn[order], reference_heights[order]))
+            for threshold in (1e-2, 1e-3, 1e-4)
+        }
+        band_edges = [
+            (threshold_heights[1e-2], threshold_heights[1e-3], "0.92", r"$Kn<0.01$"),
+            (threshold_heights[1e-3], threshold_heights[1e-4], "0.84", r"$Kn<0.001$"),
+            (threshold_heights[1e-4], HISTOGRAM_ALTITUDE_RANGE_KM[0], "0.76", r"$Kn<0.0001$"),
+        ]
+        x_label = 0.10
+        for upper, lower, shade, label in band_edges:
+            ax_temp.axhspan(lower, upper, color=shade, zorder=0)
+            ax_temp.text(
+                x_label,
+                0.5 * (lower + upper),
+                label,
+                transform=ax_temp.get_yaxis_transform(),
+                ha="left",
+                va="center",
+                fontsize=11,
+                color="0.25",
+                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.7, "pad": 1.0},
+            )
         print("saving to %s"%(output_path))
         fig.savefig(output_path, dpi=300, bbox_inches="tight")
         if show:
