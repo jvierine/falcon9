@@ -560,12 +560,11 @@ def make_figure(output_path: Path, show=False):
             for threshold in (1e-2, 1e-3, 1e-4)
         }
         band_edges = [
-            (threshold_heights[1e-2], threshold_heights[1e-3], "0.92", r"$Kn<0.01$"),
-            (threshold_heights[1e-3], threshold_heights[1e-4], "0.84", r"$Kn<0.001$"),
-            (threshold_heights[1e-4], HISTOGRAM_ALTITUDE_RANGE_KM[0], "0.76", r"$Kn<0.0001$"),
+            (threshold_heights[1e-2], threshold_heights[1e-3], "0.92", r"$Kn<0.01$", 0.10),
+            (threshold_heights[1e-3], threshold_heights[1e-4], "0.84", r"$Kn<0.001$", 0.10),
+            (threshold_heights[1e-4], HISTOGRAM_ALTITUDE_RANGE_KM[0], "0.76", r"$Kn<0.0001$", 0.58),
         ]
-        x_label = 0.10
-        for upper, lower, shade, label in band_edges:
+        for upper, lower, shade, label, x_label in band_edges:
             ax_temp.axhspan(lower, upper, color=shade, zorder=0)
             ax_temp.text(
                 x_label,
