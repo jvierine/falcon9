@@ -5,6 +5,9 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import numpy as n
 
+FRAGMENT_FAMILY_1_IDS = {"1", "3", "5", "9", "n", "o", "p", "r", "s", "w", "v", "x", "z"}
+FRAGMENT_FAMILY_2_IDS = {"2", "4", "7", "8", "a", "c", "h", "g", "i", "m", "j", "l", "k", "t", "u", "e", "d"}
+
 PANEL_CUSTOM_OFFSETS = {
     "1": [2, 0],
     "2": [-2, 0],
@@ -152,20 +155,43 @@ def _plot_optical_measurements_time(
 ):
     import plot_fragments as plf
 
+    labeled_families = set()
     for i in range(len(fragment_ids)):
         tvals = plf.unix_to_datetime(fragment_times[i])
         alt_pts_km = fragment_geo_pos[i][:, 2] / 1e3
         err_m = 2.0 * fragment_pos_err[i]
 
-        point_color = "gray" if optical_color_mode == "gray" else f"C{i % 10}"
-        edge_color = "lightgray" if optical_color_mode == "gray" else "gray"
+        fid = str(fragment_ids[i])
+        if optical_color_mode == "family":
+            if fid in FRAGMENT_FAMILY_1_IDS:
+                family_key = "F1"
+                point_color = "#777777"
+                edge_color = "#b0b0b0"
+                family_label = r"$F_1$ fragment family"
+            elif fid in FRAGMENT_FAMILY_2_IDS:
+                family_key = "F2"
+                point_color = "black"
+                edge_color = "#555555"
+                family_label = r"$F_2$ fragment family"
+            else:
+                family_key = None
+                point_color = "gray"
+                edge_color = "lightgray"
+                family_label = None
+            label = family_label if family_key not in labeled_families else None
+            if family_key is not None:
+                labeled_families.add(family_key)
+        else:
+            point_color = "gray" if optical_color_mode == "gray" else f"C{i % 10}"
+            edge_color = "lightgray" if optical_color_mode == "gray" else "gray"
+            label = "Optical detection" if i == 0 else None
 
         ax.errorbar(
             tvals,
             alt_pts_km,
             yerr=(err_m / 1e3),
             fmt=".",
-            label="Optical detection" if i == 0 else None,
+            label=label,
             zorder=15,
             ecolor=edge_color,
             elinewidth=0.8,
@@ -451,7 +477,7 @@ def plot_radar_time_alt_panel(ax, title=None, font_scale=1.0):
         fragment_geo_pos,
         fragment_pos_err,
         fragment_times,
-        optical_color_mode="gray",
+        optical_color_mode="family",
     )
 
     for i in range(len(rlat)):

@@ -47,7 +47,7 @@ def pushd(path: Path):
 
 def load_height_histogram_inputs():
     with pushd(FALCON9_DIR):
-        _, _, _, _, _, fragment_geo_pos, fragment_times = plot_fragments.get_fragments()
+        _, _, fragment_ids, _, _, fragment_geo_pos, fragment_times = plot_fragments.get_fragments()
         _, _, ralt, rsnr, _, _, _, _, _ = plot_fragments.get_radar_detections()
     # Use all fragment heights (every optical detection) instead of only the initial detection heights
     fragment_heights_km_list = []
@@ -63,10 +63,21 @@ def load_height_histogram_inputs():
         fragment_heights_km = np.concatenate(fragment_heights_km_list)
     else:
         fragment_heights_km = np.asarray([], dtype=float)
+
+    branching_heights_km = []
+    for fragment_id, geo, times in zip(fragment_ids, fragment_geo_pos, fragment_times):
+        if str(fragment_id) in {"1", "2"} or geo is None or times is None or len(geo) == 0 or len(times) == 0:
+            continue
+        first_idx = int(np.argmin(np.asarray(times, dtype=float)))
+        first_height_km = float(geo[first_idx, 2]) / 1e3
+        if np.isfinite(first_height_km):
+            branching_heights_km.append(first_height_km)
+
     radar_heights_km = plot_fragments.get_radar_detection_heights_km(ralt, rsnr)
     return (
         np.asarray(fragment_heights_km, dtype=float),
         np.asarray(radar_heights_km, dtype=float),
+        np.asarray(branching_heights_km, dtype=float),
     )
 
 
@@ -308,11 +319,11 @@ def calculate_shock_data(segments):
 
 
 def make_figure(output_path: Path, show=False):
-    fragment_initial_heights_km, radar_heights_km = load_height_histogram_inputs()
+    fragment_heights_km, radar_heights_km, branching_heights_km = load_height_histogram_inputs()
     fit_segments, extrapolated_segments = load_specific_energy_loss_segments()
     speed_fit_segments, speed_extrapolated_segments = load_speed_segments()
     dynamic_pressure_fit_segments, dynamic_pressure_extrapolated_segments = load_dynamic_pressure_segments()
-    bins, hmin, hmax = compute_histogram_bins(fragment_initial_heights_km, radar_heights_km)
+    bins, hmin, hmax = compute_histogram_bins(fragment_heights_km, radar_heights_km)
     energy_vmin, energy_vmax = compute_energy_limits(fit_segments, extrapolated_segments)
     speed_vmin, speed_vmax = compute_speed_limits(speed_fit_segments, speed_extrapolated_segments)
 
@@ -321,6 +332,7 @@ def make_figure(output_path: Path, show=False):
 
     optical_color = "#6b6b6b"
     radar_color = "#cb181d"
+    branching_color = "black"
     fit_color = "black"
     extrapolated_color = "black"
 
@@ -352,7 +364,7 @@ def make_figure(output_path: Path, show=False):
         }
 
         ax_hist.hist(
-            fragment_initial_heights_km,
+            fragment_heights_km,
             bins=bins,
             orientation="horizontal",
             color=optical_color,
@@ -377,9 +389,26 @@ def make_figure(output_path: Path, show=False):
             color=radar_color,
             linewidth=1.8,
         )
-        ax_hist_top.set_xlabel("Number of radar detections")
-        ax_hist_top.tick_params(axis="x", colors=radar_color)
-        ax_hist_top.spines["top"].set_color(radar_color)
+        branching_counts, _ = np.histogram(branching_heights_km, bins=bins)
+        bin_centers = 0.5 * (bins[:-1] + bins[1:])
+        ax_hist_top.stairs(
+            branching_counts,
+            bins,
+            orientation="horizontal",
+            color=branching_color,
+            linewidth=1.8,
+        )
+        nonzero_branching = branching_counts > 0
+        ax_hist_top.plot(
+            branching_counts[nonzero_branching],
+            bin_centers[nonzero_branching],
+            "o",
+            color=branching_color,
+            markersize=3.5,
+        )
+        ax_hist_top.set_xlabel("Radar detections / branching events")
+        ax_hist_top.tick_params(axis="x", colors="black")
+        ax_hist_top.spines["top"].set_color("black")
         ax_hist_top.spines["bottom"].set_visible(False)
         ax_hist.set_ylim(*HISTOGRAM_ALTITUDE_RANGE_KM)
 
@@ -391,6 +420,15 @@ def make_figure(output_path: Path, show=False):
                 label="Optical",
             ),
             Line2D([0], [0], color=radar_color, linewidth=1.8, label="Radar"),
+            Line2D(
+                [0],
+                [0],
+                color=branching_color,
+                linewidth=1.8,
+                marker="o",
+                markersize=3.5,
+                label="Branching event",
+            ),
         ]
         ax_hist.legend(handles=hist_handles, frameon=True, loc="lower right")
 
