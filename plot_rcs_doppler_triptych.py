@@ -257,6 +257,11 @@ def main():
                 times = np.asarray(fit["time_unix"][:] * 1e9, dtype="datetime64[ns]")
                 ax3.plot(times, fit["measured_doppler_hz"][:], ".", ms=4, color="#333333", label="Measured median")
                 ax3.plot(times, fit["fitted_doppler_hz"][:], color="#d62728", lw=1.5, label="Best-fit along-track model")
+                speed = float(fit.attrs["best_speed_m_s"])
+                sigma = np.std(fit["bootstrap_speed_m_s"][:], ddof=1)
+                ax3.text(0.16, 0.91,
+                         rf"$v_\parallel = {speed:.1f} \pm {sigma:.1f}$ m/s",
+                         transform=ax3.transAxes, ha="left", va="top", fontsize=10)
             ax3.axhline(0, color="0.6", lw=0.7)
             ax3.set_ylabel("Doppler shift (Hz)")
             ax3.grid(ls=":", lw=0.5)
