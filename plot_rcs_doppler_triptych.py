@@ -263,9 +263,12 @@ def main():
                              capsize=1.5, label=r"Measured median ($\pm1\sigma$)")
                 ax3.plot(times, fit["fitted_doppler_hz"][:], color="#d62728", lw=1.5, label="Best-fit along-track model")
                 speed = float(fit.attrs["best_speed_m_s"])
-                sigma = np.std(fit["bootstrap_speed_m_s"][:], ddof=1)
+                sigma = float(fit.attrs["speed_sigma_linearized_m_s"])
+                delay = float(fit.attrs["best_time_shift_s"])
+                delay_sigma = float(fit.attrs["time_shift_sigma_linearized_s"])
                 ax3.text(0.16, 0.91,
-                         rf"$v_\parallel = {speed:.1f} \pm {sigma:.1f}$ m/s",
+                         rf"$v_\parallel = {speed:.1f} \pm {sigma:.1f}$ m/s" + "\n"
+                         + rf"$\Delta t = {delay:.2f} \pm {delay_sigma:.2f}$ s",
                          transform=ax3.transAxes, ha="left", va="top", fontsize=10)
             ax3.axhline(0, color="0.6", lw=0.7)
             ax3.set_ylabel("Doppler shift (Hz)")
