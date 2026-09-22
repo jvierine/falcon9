@@ -255,7 +255,12 @@ def main():
             axes.append(ax3)
             with h5py.File(args.velocity_fit, "r") as fit:
                 times = np.asarray(fit["time_unix"][:] * 1e9, dtype="datetime64[ns]")
-                ax3.plot(times, fit["measured_doppler_hz"][:], ".", ms=4, color="#333333", label="Measured median")
+                measured = fit["measured_doppler_hz"][:]
+                residuals = measured - fit["fitted_doppler_hz"][:]
+                residual_sigma = np.sqrt(np.sum(residuals**2) / (len(residuals) - 2))
+                ax3.errorbar(times, measured, yerr=residual_sigma, fmt=".", ms=4,
+                             color="#333333", ecolor="0.55", elinewidth=0.7,
+                             capsize=1.5, label=r"Measured median ($\pm1\sigma$)")
                 ax3.plot(times, fit["fitted_doppler_hz"][:], color="#d62728", lw=1.5, label="Best-fit along-track model")
                 speed = float(fit.attrs["best_speed_m_s"])
                 sigma = np.std(fit["bootstrap_speed_m_s"][:], ddof=1)
