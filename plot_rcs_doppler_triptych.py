@@ -9,6 +9,7 @@ import argparse
 import h5py
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse
 import numpy as np
 
 import plot_deco
@@ -196,7 +197,7 @@ def plot_optical_doppler_panel(ax):
             label=rf"$F_{fragment_id}$",
         )
 
-    ax.set_ylabel("Doppler (Hz)")
+    ax.set_ylabel("Doppler shift (Hz)")
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S", tz=timezone.utc))
     ax.tick_params(top=False, right=True)
     ax.grid(linestyle=":", linewidth=0.5, alpha=0.5)
@@ -225,6 +226,7 @@ def main():
         action="store_true",
         help="Do not open the figure interactively after saving.",
     )
+    parser.add_argument("--velocity-fit", type=Path, help="HDF5 memo fit; adds panel d.")
     args = parser.parse_args()
     fit_path = resolve_repo_path(args.fit_path)
 
@@ -233,12 +235,12 @@ def main():
     shared_xlim = mdates.date2num([start_dt, end_dt])
 
     with plt.rc_context(triptych_rcparams()):
-        fig = plt.figure(figsize=(5.2, 6.0), constrained_layout=True)
+        fig = plt.figure(figsize=(5.2, 8.0 if args.velocity_fit else 6.0), constrained_layout=True)
         gs = fig.add_gridspec(
-            3,
+            4 if args.velocity_fit else 3,
             2,
             width_ratios=[1.0, 0.05],
-            height_ratios=[1.0, 1.0, 0.9],
+            height_ratios=[1.0, 1.0, 0.9, 0.9] if args.velocity_fit else [1.0, 1.0, 0.9],
         )
         ax0 = fig.add_subplot(gs[0, 0])
         cax0 = fig.add_subplot(gs[0, 1])
@@ -248,6 +250,17 @@ def main():
         cax2 = fig.add_subplot(gs[2, 1])
         cax2.axis("off")
         axes = [ax0, ax1, ax2]
+        if args.velocity_fit:
+            ax3 = fig.add_subplot(gs[3, 0], sharex=ax0)
+            axes.append(ax3)
+            with h5py.File(args.velocity_fit, "r") as fit:
+                times = np.asarray(fit["time_unix"][:] * 1e9, dtype="datetime64[ns]")
+                ax3.plot(times, fit["measured_doppler_hz"][:], ".", ms=4, color="#333333", label="Measured median")
+                ax3.plot(times, fit["fitted_doppler_hz"][:], color="#d62728", lw=1.5, label="Best-fit along-track model")
+            ax3.axhline(0, color="0.6", lw=0.7)
+            ax3.set_ylabel("Doppler shift (Hz)")
+            ax3.grid(ls=":", lw=0.5)
+            ax3.legend(frameon=False, loc="lower right", fontsize=8)
 
         rcs_grid = compute_fit_range_rcs_grid(
             tx="kborn",
@@ -271,6 +284,12 @@ def main():
         )
         cb0 = fig.colorbar(rcs_result["mesh"], cax=cax0)
         cb0.set_label("RCS (dBsm)")
+        # Reproduce the white arrows and ellipse in the annotated article Figure 7a.
+        ax0.text(0.54, 0.79, "Non-specular echoes", color="white", ha="center", transform=ax0.transAxes, fontsize=9)
+        for xy, xytext in [((0.25, 0.53), (0.45, 0.76)), ((0.76, 0.46), (0.59, 0.76))]:
+            ax0.annotate("", xy=xy, xytext=xytext, xycoords="axes fraction", arrowprops=dict(arrowstyle="-|>", color="white", lw=1.2))
+        ax0.add_patch(Ellipse((0.60, 0.16), 0.445, 0.25, transform=ax0.transAxes, fill=False, edgecolor="white", lw=1.3))
+        ax0.annotate("Specular echoes", xy=(0.38, 0.12), xytext=(0.03, 0.09), xycoords="axes fraction", color="white", fontsize=9, arrowprops=dict(arrowstyle="-|>", color="white", lw=1.2))
 
         mesh1 = plot_doppler_range_panel(axes[1])
         cb1 = fig.colorbar(mesh1, cax=cax1)
@@ -336,17 +355,17 @@ def main():
         axes[1].set_xlabel("")
         axes[1].set_ylabel("Range (km)")
         axes[1].tick_params(labelleft=True)
-        axes[2].set_xlabel("Time (UTC)")
+        axes[-1].set_xlabel("Time (UTC)")
 
-        for ax in axes[:2]:
+        for ax in axes[:-1]:
             ax.set_xlim(shared_xlim)
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S", tz=timezone.utc))
             ax.tick_params(axis="x", rotation=30, labelbottom=False)
-        axes[2].set_xlim(shared_xlim)
-        axes[2].xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S", tz=timezone.utc))
-        axes[2].tick_params(axis="x", rotation=30)
+        axes[-1].set_xlim(shared_xlim)
+        axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S", tz=timezone.utc))
+        axes[-1].tick_params(axis="x", rotation=30)
 
-        panel_labels = ["a)", "b)", "c)"]
+        panel_labels = ["a)", "b)", "c)", "d)"]
         for ax, label in zip(axes, panel_labels):
             ax.text(
                 0.02,
